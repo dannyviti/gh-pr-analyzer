@@ -1,0 +1,10 @@
+# Core dependencies for GitHub PR analysis tool
+requests>=2.31.0
+python-dateutil>=2.8.2
+
+# Testing dependencies
+pytest>=7.4.0
+pytest-mock>=3.11.0
+
+# Development dependencies
+pytest-cov>=4.1.0  # For test coverage reporting
