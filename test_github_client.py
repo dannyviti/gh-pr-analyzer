@@ -309,6 +309,12 @@ class TestAPIRequestHandling:
         # Mock 401 Unauthorized response
         mock_response = Mock()
         mock_response.status_code = 401
+        mock_response.headers = {
+            'X-RateLimit-Remaining': '5000',
+            'X-RateLimit-Limit': '5000',
+            'X-RateLimit-Reset': '1640995200',
+            'X-RateLimit-Used': '0'
+        }
         mock_get.return_value = mock_response
         
         with pytest.raises(GitHubAuthenticationError, match="GitHub token is invalid or expired"):
@@ -320,7 +326,7 @@ class TestAPIRequestHandling:
         # Mock requests.RequestException
         mock_get.side_effect = requests.ConnectionError("Connection failed")
         
-        with pytest.raises(GitHubAPIError, match="Failed to make API request"):
+        with pytest.raises(GitHubAPIError, match="GitHub API request to .* failed after .* attempts"):
             self.client._make_api_request("https://api.github.com/test")
 
 
@@ -710,6 +716,12 @@ class TestTimelineDataParsing:
         """Test timeline fetching for non-existent PR."""
         mock_response = Mock()
         mock_response.status_code = 404
+        mock_response.headers = {
+            'X-RateLimit-Remaining': '5000',
+            'X-RateLimit-Limit': '5000',
+            'X-RateLimit-Reset': '1640995200',
+            'X-RateLimit-Used': '0'
+        }
         mock_get.return_value = mock_response
         
         result = self.client.get_pr_timeline("testowner", "test-repo", 999)
@@ -751,6 +763,320 @@ class TestTimelineDataParsing:
         assert len(result) == 109
         assert result[0]['event'] == 'event1'
         assert result[-1]['event'] == 'event109'
+
+
+class TestReviewerDataFetching:
+    """Test cases for reviewer request data fetching and processing."""
+    
+    @pytest.fixture
+    def mock_client(self):
+        """Create a GitHubClient with mocked session for testing."""
+        with patch('github_client.requests.Session') as mock_session_class:
+            mock_session = Mock()
+            mock_session_class.return_value = mock_session
+            mock_session.headers = {}
+            
+            client = GitHubClient("test_token")
+            client.session = mock_session
+            return client, mock_session
+    
+    def test_get_pr_requested_reviewers_success(self, mock_client):
+        """Test successful retrieval of requested reviewers for a PR."""
+        client, mock_session = mock_client
+        
+        # Mock the API response
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            'X-RateLimit-Remaining': '5000',
+            'X-RateLimit-Limit': '5000',
+            'X-RateLimit-Reset': '1640995200',
+            'X-RateLimit-Used': '0'
+        }
+        mock_response.json.return_value = {
+            'users': [
+                {'id': 1, 'login': 'reviewer1'},
+                {'id': 2, 'login': 'reviewer2'}
+            ],
+            'teams': [
+                {'id': 10, 'slug': 'team-frontend', 'name': 'Frontend Team'},
+                {'id': 11, 'slug': 'team-backend', 'name': 'Backend Team'}
+            ]
+        }
+        mock_session.get.return_value = mock_response
+        
+        result = client.get_pr_requested_reviewers('owner', 'repo', 123)
+        
+        # Verify the API call
+        expected_url = "https://api.github.com/repos/owner/repo/pulls/123/requested_reviewers"
+        mock_session.get.assert_called_once_with(expected_url, params=None)
+        
+        # Verify the result structure
+        assert 'users' in result
+        assert 'teams' in result
+        assert len(result['users']) == 2
+        assert len(result['teams']) == 2
+        assert result['users'][0]['login'] == 'reviewer1'
+        assert result['teams'][0]['slug'] == 'team-frontend'
+    
+    def test_get_pr_requested_reviewers_empty_response(self, mock_client):
+        """Test handling empty reviewer response."""
+        client, mock_session = mock_client
+        
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            'X-RateLimit-Remaining': '5000',
+            'X-RateLimit-Limit': '5000',
+            'X-RateLimit-Reset': '1640995200',
+            'X-RateLimit-Used': '0'
+        }
+        mock_response.json.return_value = {'users': [], 'teams': []}
+        mock_session.get.return_value = mock_response
+        
+        result = client.get_pr_requested_reviewers('owner', 'repo', 123)
+        
+        assert result['users'] == []
+        assert result['teams'] == []
+    
+    def test_get_pr_requested_reviewers_not_found(self, mock_client):
+        """Test handling 404 response for requested reviewers."""
+        client, mock_session = mock_client
+        
+        mock_response = Mock()
+        mock_response.status_code = 404
+        mock_response.text = "Not Found"
+        mock_session.get.return_value = mock_response
+        
+        # Simulate the GitHubAPIError that would be raised by _make_api_request
+        with patch.object(client, '_make_api_request', side_effect=GitHubAPIError("404 Not Found")):
+            result = client.get_pr_requested_reviewers('owner', 'repo', 123)
+            
+            # Should return empty lists for 404
+            assert result['users'] == []
+            assert result['teams'] == []
+    
+    def test_get_pr_requested_reviewers_invalid_params(self, mock_client):
+        """Test input validation for get_pr_requested_reviewers."""
+        client, mock_session = mock_client
+        
+        # Test missing owner
+        with pytest.raises(GitHubAPIError, match="Repository owner and name are required"):
+            client.get_pr_requested_reviewers('', 'repo', 123)
+        
+        # Test missing repo
+        with pytest.raises(GitHubAPIError, match="Repository owner and name are required"):
+            client.get_pr_requested_reviewers('owner', '', 123)
+        
+        # Test invalid PR number
+        with pytest.raises(GitHubAPIError, match="Invalid PR number"):
+            client.get_pr_requested_reviewers('owner', 'repo', 0)
+        
+        with pytest.raises(GitHubAPIError, match="Invalid PR number"):
+            client.get_pr_requested_reviewers('owner', 'repo', -1)
+    
+    def test_get_team_members_success(self, mock_client):
+        """Test successful retrieval of team members."""
+        client, mock_session = mock_client
+        
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            'X-RateLimit-Remaining': '5000',
+            'X-RateLimit-Limit': '5000',
+            'X-RateLimit-Reset': '1640995200',
+            'X-RateLimit-Used': '0'
+        }
+        mock_response.json.return_value = [
+            {'id': 1, 'login': 'member1'},
+            {'id': 2, 'login': 'member2'},
+            {'id': 3, 'login': 'member3'}
+        ]
+        mock_session.get.return_value = mock_response
+        
+        result = client.get_team_members('myorg', 'team-slug')
+        
+        # Verify the API call
+        expected_url = "https://api.github.com/orgs/myorg/teams/team-slug/members"
+        mock_session.get.assert_called_once_with(expected_url, params=None)
+        
+        # Verify the result
+        assert len(result) == 3
+        assert result[0]['login'] == 'member1'
+        assert result[2]['login'] == 'member3'
+    
+    def test_get_team_members_not_found(self, mock_client):
+        """Test handling 404 response for team members."""
+        client, mock_session = mock_client
+        
+        # Simulate the GitHubAPIError that would be raised by _make_api_request
+        with patch.object(client, '_make_api_request', side_effect=GitHubAPIError("404 Not Found")):
+            result = client.get_team_members('myorg', 'nonexistent-team')
+            
+            # Should return empty list for 404
+            assert result == []
+    
+    def test_get_team_members_invalid_params(self, mock_client):
+        """Test input validation for get_team_members."""
+        client, mock_session = mock_client
+        
+        # Test missing org
+        with pytest.raises(GitHubAPIError, match="Organization name and team slug are required"):
+            client.get_team_members('', 'team-slug')
+        
+        # Test missing team_slug
+        with pytest.raises(GitHubAPIError, match="Organization name and team slug are required"):
+            client.get_team_members('myorg', '')
+    
+    def test_expand_team_reviewers_success(self, mock_client):
+        """Test successful expansion of team reviewers to individual members."""
+        client, mock_session = mock_client
+        
+        teams = [
+            {'id': 10, 'slug': 'team-frontend', 'name': 'Frontend Team'},
+            {'id': 11, 'slug': 'team-backend', 'name': 'Backend Team'}
+        ]
+        
+        # Mock the get_team_members calls
+        def mock_get_team_members(org, team_slug):
+            if team_slug == 'team-frontend':
+                return [{'id': 1, 'login': 'frontend1'}, {'id': 2, 'login': 'frontend2'}]
+            elif team_slug == 'team-backend':
+                return [{'id': 3, 'login': 'backend1'}, {'id': 1, 'login': 'frontend1'}]  # Duplicate ID 1
+            return []
+        
+        with patch.object(client, 'get_team_members', side_effect=mock_get_team_members):
+            result = client.expand_team_reviewers(teams, 'myorg')
+        
+        # Should have 3 unique members (duplicate removed)
+        assert len(result) == 3
+        user_ids = [member['id'] for member in result]
+        assert 1 in user_ids
+        assert 2 in user_ids
+        assert 3 in user_ids
+    
+    def test_expand_team_reviewers_empty_teams(self, mock_client):
+        """Test expand_team_reviewers with empty teams list."""
+        client, mock_session = mock_client
+        
+        result = client.expand_team_reviewers([], 'myorg')
+        
+        assert result == []
+    
+    def test_expand_team_reviewers_no_org(self, mock_client):
+        """Test expand_team_reviewers with no organization provided."""
+        client, mock_session = mock_client
+        
+        teams = [{'id': 10, 'slug': 'team-frontend', 'name': 'Frontend Team'}]
+        
+        result = client.expand_team_reviewers(teams, '')
+        
+        assert result == []
+    
+    def test_expand_team_reviewers_missing_slug(self, mock_client):
+        """Test expand_team_reviewers with team missing slug field."""
+        client, mock_session = mock_client
+        
+        teams = [
+            {'id': 10, 'name': 'Frontend Team'},  # Missing slug
+            {'id': 11, 'slug': 'team-backend', 'name': 'Backend Team'}
+        ]
+        
+        with patch.object(client, 'get_team_members') as mock_get_members:
+            mock_get_members.return_value = [{'id': 3, 'login': 'backend1'}]
+            
+            result = client.expand_team_reviewers(teams, 'myorg')
+        
+        # Should only process the team with valid slug
+        assert len(result) == 1
+        assert result[0]['login'] == 'backend1'
+        mock_get_members.assert_called_once_with('myorg', 'team-backend')
+    
+    def test_expand_team_reviewers_api_error(self, mock_client):
+        """Test expand_team_reviewers handling API errors gracefully."""
+        client, mock_session = mock_client
+        
+        teams = [
+            {'id': 10, 'slug': 'team-frontend', 'name': 'Frontend Team'},
+            {'id': 11, 'slug': 'team-backend', 'name': 'Backend Team'}
+        ]
+        
+        def mock_get_team_members(org, team_slug):
+            if team_slug == 'team-frontend':
+                raise GitHubAPIError("API Error")
+            elif team_slug == 'team-backend':
+                return [{'id': 3, 'login': 'backend1'}]
+            return []
+        
+        with patch.object(client, 'get_team_members', side_effect=mock_get_team_members):
+            result = client.expand_team_reviewers(teams, 'myorg')
+        
+        # Should return only successful team expansion
+        assert len(result) == 1
+        assert result[0]['login'] == 'backend1'
+    
+    def test_extract_reviewer_requests_from_pr_success(self, mock_client):
+        """Test successful extraction of reviewer requests from PR data."""
+        client, mock_session = mock_client
+        
+        pr_data = {
+            'number': 123,
+            'requested_reviewers': [
+                {'id': 1, 'login': 'reviewer1'},
+                {'id': 2, 'login': 'reviewer2'}
+            ],
+            'requested_teams': [
+                {'id': 10, 'slug': 'team-frontend'}
+            ]
+        }
+        
+        result = client.extract_reviewer_requests_from_pr(pr_data)
+        
+        assert 'users' in result
+        assert 'teams' in result
+        assert len(result['users']) == 2
+        assert len(result['teams']) == 1
+        assert result['users'][0]['login'] == 'reviewer1'
+        assert result['teams'][0]['slug'] == 'team-frontend'
+    
+    def test_extract_reviewer_requests_from_pr_empty_data(self, mock_client):
+        """Test extraction from PR with no reviewer data."""
+        client, mock_session = mock_client
+        
+        pr_data = {'number': 123}  # Missing reviewer fields
+        
+        result = client.extract_reviewer_requests_from_pr(pr_data)
+        
+        assert result['users'] == []
+        assert result['teams'] == []
+    
+    def test_extract_reviewer_requests_from_pr_invalid_data(self, mock_client):
+        """Test extraction from invalid PR data."""
+        client, mock_session = mock_client
+        
+        # Test None data
+        result = client.extract_reviewer_requests_from_pr(None)
+        assert result == {'users': [], 'teams': []}
+        
+        # Test non-dict data
+        result = client.extract_reviewer_requests_from_pr("invalid")
+        assert result == {'users': [], 'teams': []}
+    
+    def test_extract_reviewer_requests_from_pr_invalid_lists(self, mock_client):
+        """Test extraction from PR with invalid reviewer list data."""
+        client, mock_session = mock_client
+        
+        pr_data = {
+            'number': 123,
+            'requested_reviewers': 'not-a-list',  # Should be a list
+            'requested_teams': {'invalid': 'dict'}  # Should be a list
+        }
+        
+        result = client.extract_reviewer_requests_from_pr(pr_data)
+        
+        # Should gracefully handle invalid data
+        assert result['users'] == []
+        assert result['teams'] == []
 
 
 if __name__ == "__main__":

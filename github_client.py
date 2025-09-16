@@ -182,8 +182,10 @@ class GitHubClient:
         # Log current rate limit status
         self.logger.debug(f"API rate limit: {rate_info['remaining']}/{rate_info['limit']} remaining")
         
-        # Handle rate limit exceeded
-        if response.status_code == 403 and rate_info['remaining'] == 0:
+        # Handle rate limit exceeded - only treat as rate limit if headers are actually present
+        # If no rate limit headers are present, this is a regular 403 Forbidden, not a rate limit
+        has_rate_limit_headers = 'X-RateLimit-Remaining' in response.headers
+        if response.status_code == 403 and has_rate_limit_headers and rate_info['remaining'] == 0:
             wait_time = self._calculate_wait_time(rate_info['reset'])
             reset_time_str = datetime.fromtimestamp(rate_info['reset']).strftime('%Y-%m-%d %H:%M:%S')
             
@@ -756,6 +758,170 @@ class GitHubClient:
             raise
         except Exception as e:
             raise GitHubAPIError(f"Failed to fetch PR commits: {e}")
+    
+    def get_pr_requested_reviewers(self, owner: str, repo: str, pr_number: int) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get current requested reviewers for a specific pull request.
+        
+        This method fetches the current requested reviewers and teams for a PR,
+        returning both individual reviewers and teams in separate lists.
+        
+        Args:
+            owner: Repository owner (user or organization)
+            repo: Repository name
+            pr_number: Pull request number
+            
+        Returns:
+            Dictionary with 'users' and 'teams' keys containing requested reviewer data
+            
+        Raises:
+            GitHubAPIError: If API request fails
+        """
+        if not owner or not repo:
+            raise GitHubAPIError("Repository owner and name are required")
+        
+        if not pr_number or pr_number <= 0:
+            raise GitHubAPIError(f"Invalid PR number: {pr_number}")
+        
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers"
+        
+        try:
+            reviewer_data = self._make_api_request(url)
+            
+            users = reviewer_data.get('users', [])
+            teams = reviewer_data.get('teams', [])
+            
+            self.logger.debug(f"Fetched {len(users)} user reviewers and {len(teams)} team reviewers for PR #{pr_number}")
+            
+            return {
+                'users': users,
+                'teams': teams
+            }
+            
+        except GitHubAPIError as e:
+            if "404" in str(e):
+                self.logger.debug(f"No requested reviewers found for PR #{pr_number} (or PR not found)")
+                return {'users': [], 'teams': []}
+            raise GitHubAPIError(f"Failed to fetch requested reviewers for PR #{pr_number}: {e}")
+    
+    def get_team_members(self, org: str, team_slug: str) -> List[Dict[str, Any]]:
+        """
+        Get members of a GitHub team by organization and team slug.
+        
+        Args:
+            org: Organization name
+            team_slug: Team slug (URL-friendly team name)
+            
+        Returns:
+            List of team member user data dictionaries
+            
+        Raises:
+            GitHubAPIError: If API request fails
+        """
+        if not org or not team_slug:
+            raise GitHubAPIError("Organization name and team slug are required")
+        
+        url = f"{self.BASE_URL}/orgs/{org}/teams/{team_slug}/members"
+        
+        try:
+            members = self._make_api_request(url)
+            self.logger.debug(f"Fetched {len(members)} members for team {org}/{team_slug}")
+            return members
+            
+        except GitHubAPIError as e:
+            if "404" in str(e):
+                self.logger.warning(f"Team {org}/{team_slug} not found or not accessible")
+                return []
+            raise GitHubAPIError(f"Failed to fetch team members for {org}/{team_slug}: {e}")
+    
+    def expand_team_reviewers(self, teams: List[Dict[str, Any]], org: str) -> List[Dict[str, Any]]:
+        """
+        Expand team reviewer requests to individual team members.
+        
+        This method takes a list of team objects and returns a list of individual
+        user objects representing all members of those teams.
+        
+        Args:
+            teams: List of team dictionaries from requested_teams
+            org: Organization name to use for team member lookup
+            
+        Returns:
+            List of individual user dictionaries from all team members
+        """
+        if not teams:
+            return []
+        
+        if not org:
+            self.logger.warning("No organization provided for team expansion, skipping")
+            return []
+        
+        expanded_members = []
+        
+        for team in teams:
+            team_slug = team.get('slug')
+            team_name = team.get('name', team_slug)
+            
+            if not team_slug:
+                self.logger.warning(f"Team missing slug field, skipping: {team}")
+                continue
+                
+            try:
+                members = self.get_team_members(org, team_slug)
+                expanded_members.extend(members)
+                self.logger.debug(f"Expanded team '{team_name}' to {len(members)} members")
+                
+            except Exception as e:
+                self.logger.warning(f"Failed to expand team '{team_name}': {e}")
+                continue
+        
+        # Remove duplicates based on user ID
+        unique_members = {}
+        for member in expanded_members:
+            user_id = member.get('id')
+            if user_id and user_id not in unique_members:
+                unique_members[user_id] = member
+        
+        unique_list = list(unique_members.values())
+        self.logger.debug(f"Team expansion resulted in {len(unique_list)} unique members from {len(teams)} teams")
+        
+        return unique_list
+    
+    def extract_reviewer_requests_from_pr(self, pr_data: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Extract reviewer request data from a pull request object.
+        
+        This method handles the extraction of requested_reviewers and requested_teams
+        data from PR objects, with proper error handling for missing fields.
+        
+        Args:
+            pr_data: Pull request data dictionary from GitHub API
+            
+        Returns:
+            Dictionary with 'users' and 'teams' keys containing reviewer request data
+        """
+        if not pr_data or not isinstance(pr_data, dict):
+            return {'users': [], 'teams': []}
+        
+        pr_number = pr_data.get('number', 'unknown')
+        
+        # Extract requested reviewers (individual users)
+        requested_users = pr_data.get('requested_reviewers', [])
+        if not isinstance(requested_users, list):
+            self.logger.warning(f"PR #{pr_number}: requested_reviewers is not a list, treating as empty")
+            requested_users = []
+        
+        # Extract requested teams
+        requested_teams = pr_data.get('requested_teams', [])
+        if not isinstance(requested_teams, list):
+            self.logger.warning(f"PR #{pr_number}: requested_teams is not a list, treating as empty")
+            requested_teams = []
+        
+        self.logger.debug(f"PR #{pr_number}: Found {len(requested_users)} user reviewers and {len(requested_teams)} team reviewers")
+        
+        return {
+            'users': requested_users,
+            'teams': requested_teams
+        }
 
 
 def setup_logging(level: str = "INFO") -> None:

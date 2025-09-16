@@ -280,6 +280,214 @@ class CSVReporter:
         """
         return str(self.output_path)
     
+    def generate_reviewer_report(self, reviewer_summary: Dict[str, Any]) -> str:
+        """
+        Generate CSV report from reviewer workload analysis results.
+        
+        Args:
+            reviewer_summary: Dictionary containing reviewer workload analysis data
+            
+        Returns:
+            Path to the generated CSV file
+            
+        Raises:
+            CSVReportError: If report generation fails
+        """
+        if not reviewer_summary:
+            raise CSVReportError("Reviewer summary is required")
+        
+        if 'reviewer_data' not in reviewer_summary:
+            raise CSVReportError("Reviewer summary must contain 'reviewer_data'")
+        
+        reviewer_data = reviewer_summary['reviewer_data']
+        metadata = reviewer_summary.get('metadata', {})
+        statistics = reviewer_summary.get('statistics', {})
+        overload_analysis = reviewer_summary.get('overload_analysis', {})
+        distribution_analysis = reviewer_summary.get('distribution_analysis', {})
+        
+        try:
+            # Generate reviewer CSV headers
+            headers = self._format_reviewer_csv_headers()
+            
+            # Format reviewer CSV rows
+            rows = self._format_reviewer_csv_rows(reviewer_data, overload_analysis)
+            
+            # Write CSV file
+            with open(self.output_path, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                
+                # Write reviewer summary information as comments
+                self._write_reviewer_summary_header(writer, metadata, statistics, distribution_analysis)
+                
+                # Write headers
+                writer.writerow(headers)
+                
+                # Write data rows
+                writer.writerows(rows)
+            
+            self.logger.info(f"Generated reviewer CSV report with {len(reviewer_data)} reviewers at {self.output_path}")
+            
+            return str(self.output_path)
+            
+        except Exception as e:
+            raise CSVReportError(f"Failed to generate reviewer CSV report: {e}")
+    
+    def _format_reviewer_csv_headers(self) -> List[str]:
+        """
+        Define CSV column structure for reviewer workload analysis.
+        
+        Returns:
+            List of CSV column headers for reviewer data
+        """
+        return [
+            'reviewer_login',
+            'reviewer_name',
+            'reviewer_type',
+            'total_requests',
+            'pr_numbers',
+            'request_sources',
+            'first_request_date',
+            'last_request_date',
+            'avg_requests_per_month',
+            'percentage_of_total',
+            'workload_status',
+            'workload_category'
+        ]
+    
+    def _format_reviewer_csv_rows(self, reviewer_data: Dict[str, Dict[str, Any]], 
+                                  overload_analysis: Dict[str, List[str]]) -> List[List[str]]:
+        """
+        Format reviewer data rows for CSV output.
+        
+        Args:
+            reviewer_data: Dictionary of reviewer request data
+            overload_analysis: Dictionary containing overload categorization
+            
+        Returns:
+            List of CSV data rows
+        """
+        if not reviewer_data:
+            return []
+        
+        rows = []
+        total_requests = sum(data.get('total_requests', 0) for data in reviewer_data.values())
+        
+        # Create lookup for workload status
+        workload_status = {}
+        for status, reviewers in overload_analysis.items():
+            for reviewer in reviewers:
+                workload_status[reviewer] = status
+        
+        # Calculate months for average calculation (estimate from date range)
+        months_analyzed = 1  # Default to 1 month if we can't determine
+        
+        for login, data in reviewer_data.items():
+            try:
+                requests = data.get('total_requests', 0)
+                
+                # Calculate average requests per month
+                avg_per_month = requests / months_analyzed
+                
+                # Calculate percentage of total requests
+                percentage = (requests / total_requests * 100) if total_requests > 0 else 0.0
+                
+                # Determine reviewer type (individual or team)
+                reviewer_type = 'team' if login.startswith('team:') else 'user'
+                
+                # Format PR numbers list
+                pr_numbers_str = ', '.join(str(pr) for pr in data.get('pr_numbers', []))
+                
+                # Format request sources
+                sources_str = ', '.join(data.get('request_sources', []))
+                
+                # Get workload status
+                status = workload_status.get(login, 'NORMAL')
+                
+                # Determine workload category based on status
+                if status == 'OVERLOADED':
+                    category = 'Overloaded'
+                elif status == 'HIGH':
+                    category = 'High Load'
+                else:
+                    category = 'Normal Load'
+                
+                row = [
+                    str(login),
+                    self._sanitize_text(data.get('name', login)),
+                    reviewer_type,
+                    str(requests),
+                    pr_numbers_str,
+                    sources_str,
+                    self._format_datetime(data.get('first_request_date')),
+                    self._format_datetime(data.get('last_request_date')),
+                    self._format_number(avg_per_month),
+                    self._format_number(percentage),
+                    status,
+                    category
+                ]
+                
+                rows.append(row)
+                
+            except Exception as e:
+                self.logger.warning(f"Failed to format reviewer {login}: {e}")
+                continue
+        
+        # Sort rows by total requests (descending)
+        rows.sort(key=lambda x: int(x[3]) if x[3].isdigit() else 0, reverse=True)
+        
+        return rows
+    
+    def _write_reviewer_summary_header(self, writer: csv.writer, metadata: Dict[str, Any], 
+                                     statistics: Dict[str, Any], distribution: Dict[str, Any]) -> None:
+        """
+        Write reviewer analysis summary information as CSV comments.
+        
+        Args:
+            writer: CSV writer instance
+            metadata: Analysis metadata dictionary
+            statistics: Statistical summary dictionary
+            distribution: Distribution analysis dictionary
+        """
+        # Write header information
+        writer.writerow([f"# GitHub PR Reviewer Workload Analysis Report - Generated {datetime.now().isoformat()}"])
+        
+        # Metadata information
+        if metadata:
+            total_prs = metadata.get('total_prs_analyzed', 0)
+            threshold = metadata.get('overload_threshold', 10)
+            include_teams = metadata.get('include_teams', False)
+            org_name = metadata.get('org_name', 'N/A')
+            
+            writer.writerow([f"# Total PRs Analyzed: {total_prs}"])
+            writer.writerow([f"# Overload Threshold: {threshold} requests"])
+            writer.writerow([f"# Team Analysis Enabled: {include_teams}"])
+            if include_teams:
+                writer.writerow([f"# Organization: {org_name}"])
+        
+        # Statistical summary
+        if statistics:
+            total_reviewers = statistics.get('total_reviewers', 0)
+            total_requests = statistics.get('total_requests', 0)
+            mean_requests = statistics.get('mean_requests', 0)
+            median_requests = statistics.get('median_requests', 0)
+            
+            writer.writerow([f"# Total Reviewers: {total_reviewers}"])
+            writer.writerow([f"# Total Review Requests: {total_requests}"])
+            writer.writerow([f"# Average Requests per Reviewer: {mean_requests:.2f}"])
+            writer.writerow([f"# Median Requests per Reviewer: {median_requests:.2f}"])
+        
+        # Distribution insights
+        if distribution:
+            concentration = distribution.get('concentration_ratio', 0)
+            gini = distribution.get('gini_coefficient', 0)
+            diversity = distribution.get('reviewer_diversity_score', 0)
+            
+            writer.writerow([f"# Top 20% Reviewers Handle: {concentration:.1%} of requests"])
+            writer.writerow([f"# Gini Coefficient (inequality): {gini:.3f}"])
+            writer.writerow([f"# Diversity Score: {diversity:.3f}"])
+        
+        writer.writerow([])  # Empty line before headers
+    
     def validate_analysis_results(self, analysis_results: Dict[str, Any]) -> bool:
         """
         Validate analysis results structure for CSV generation.
@@ -312,5 +520,66 @@ class CSVReporter:
             for field in required_fields:
                 if field not in pr:
                     raise CSVReportError(f"PR detail at index {i} missing required field: {field}")
+        
+        return True
+    
+    def validate_reviewer_summary(self, reviewer_summary: Dict[str, Any]) -> bool:
+        """
+        Validate reviewer summary structure for CSV generation.
+        
+        Args:
+            reviewer_summary: Reviewer summary dictionary to validate
+            
+        Returns:
+            True if summary is valid for CSV generation
+            
+        Raises:
+            CSVReportError: If validation fails
+        """
+        if not isinstance(reviewer_summary, dict):
+            raise CSVReportError("Reviewer summary must be a dictionary")
+        
+        # Check for required top-level keys
+        required_keys = ['reviewer_data', 'metadata', 'statistics', 'overload_analysis']
+        for key in required_keys:
+            if key not in reviewer_summary:
+                raise CSVReportError(f"Reviewer summary must contain '{key}' key")
+        
+        reviewer_data = reviewer_summary['reviewer_data']
+        if not isinstance(reviewer_data, dict):
+            raise CSVReportError("'reviewer_data' must be a dictionary")
+        
+        # Validate required fields in each reviewer entry
+        required_reviewer_fields = ['login', 'total_requests', 'pr_numbers']
+        for login, data in reviewer_data.items():
+            if not isinstance(data, dict):
+                raise CSVReportError(f"Reviewer data for '{login}' must be a dictionary")
+            
+            for field in required_reviewer_fields:
+                if field not in data:
+                    raise CSVReportError(f"Reviewer data for '{login}' missing required field: {field}")
+        
+        # Validate metadata structure
+        metadata = reviewer_summary['metadata']
+        if not isinstance(metadata, dict):
+            raise CSVReportError("'metadata' must be a dictionary")
+        
+        # Validate statistics structure  
+        statistics = reviewer_summary['statistics']
+        if not isinstance(statistics, dict):
+            raise CSVReportError("'statistics' must be a dictionary")
+        
+        # Validate overload analysis structure
+        overload_analysis = reviewer_summary['overload_analysis']
+        if not isinstance(overload_analysis, dict):
+            raise CSVReportError("'overload_analysis' must be a dictionary")
+        
+        expected_categories = ['OVERLOADED', 'HIGH', 'NORMAL']
+        for category in expected_categories:
+            if category not in overload_analysis:
+                raise CSVReportError(f"'overload_analysis' must contain '{category}' key")
+            
+            if not isinstance(overload_analysis[category], list):
+                raise CSVReportError(f"'overload_analysis[{category}]' must be a list")
         
         return True

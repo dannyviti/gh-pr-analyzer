@@ -14,10 +14,14 @@ from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime
 import argparse
 
-from github_pr_analyzer import main, parse_arguments, validate_inputs, print_summary, sanitize_repository_name_for_filename, generate_auto_filename, validate_repository_name_format
+from github_pr_analyzer import (
+    main, parse_arguments, validate_inputs, print_summary, print_reviewer_summary,
+    sanitize_repository_name_for_filename, generate_auto_filename, validate_repository_name_format
+)
 from github_client import GitHubClient, GitHubAPIError, GitHubAuthenticationError
 from pr_analyzer import PRAnalyzer, PRAnalysisError
 from csv_reporter import CSVReporter, CSVReportError
+from reviewer_analyzer import ReviewerWorkloadAnalyzer
 
 
 class TestEndToEndAnalysis:
@@ -826,6 +830,266 @@ class TestRepositoryNameValidation:
                 
                 with pytest.raises(ValueError, match="Repository must be in format 'owner/repo' with valid characters"):
                     validate_inputs(args)
+
+
+class TestReviewerAnalysisCLIIntegration:
+    """Test cases for reviewer analysis CLI integration."""
+    
+    def setup_method(self):
+        """Set up test environment for reviewer analysis tests."""
+        self.tmpdir = tempfile.mkdtemp()
+        self.output_file = Path(self.tmpdir) / "reviewer_analysis.csv"
+        
+        # Mock PR data with reviewer information
+        self.mock_prs_with_reviewers = [
+            {
+                'number': 100,
+                'title': 'Feature: Authentication system',
+                'created_at': '2024-12-01T10:00:00Z',
+                'requested_reviewers': [
+                    {'login': 'alice', 'name': 'Alice Johnson'},
+                    {'login': 'bob', 'name': 'Bob Smith'}
+                ],
+                'requested_teams': [
+                    {'name': 'core-team', 'slug': 'core-team'}
+                ]
+            },
+            {
+                'number': 101,
+                'title': 'Fix: Database connection issue',
+                'created_at': '2024-12-02T14:30:00Z',
+                'requested_reviewers': [
+                    {'login': 'alice', 'name': 'Alice Johnson'},
+                    {'login': 'charlie', 'name': 'Charlie Brown'}
+                ],
+                'requested_teams': []
+            },
+            {
+                'number': 102,
+                'title': 'Refactor: Code cleanup',
+                'created_at': '2024-12-03T09:15:00Z',
+                'requested_reviewers': [
+                    {'login': 'alice', 'name': 'Alice Johnson'}
+                ],
+                'requested_teams': [
+                    {'name': 'frontend-team', 'slug': 'frontend-team'}
+                ]
+            }
+        ]
+        
+        # Mock reviewer analysis summary
+        self.mock_reviewer_summary = {
+            'metadata': {
+                'analysis_date': '2024-12-15T12:00:00',
+                'total_prs_analyzed': 3,
+                'include_teams': False,
+                'overload_threshold': 10,
+                'org_name': None
+            },
+            'reviewer_data': {
+                'alice': {
+                    'login': 'alice',
+                    'name': 'Alice Johnson',
+                    'total_requests': 3,
+                    'pr_numbers': [100, 101, 102],
+                    'request_sources': ['individual', 'individual', 'individual']
+                },
+                'bob': {
+                    'login': 'bob',
+                    'name': 'Bob Smith',
+                    'total_requests': 1,
+                    'pr_numbers': [100],
+                    'request_sources': ['individual']
+                },
+                'charlie': {
+                    'login': 'charlie',
+                    'name': 'Charlie Brown',
+                    'total_requests': 1,
+                    'pr_numbers': [101],
+                    'request_sources': ['individual']
+                }
+            },
+            'statistics': {
+                'total_reviewers': 3,
+                'total_requests': 5,
+                'mean_requests': 1.67,
+                'median_requests': 1,
+                'std_dev_requests': 1.15,
+                'min_requests': 1,
+                'max_requests': 3
+            },
+            'overload_analysis': {
+                'OVERLOADED': [],
+                'HIGH': [],
+                'NORMAL': ['alice', 'bob', 'charlie']
+            },
+            'distribution_analysis': {
+                'concentration_ratio': 0.6,
+                'gini_coefficient': 0.27,
+                'top_reviewers': [
+                    {'login': 'alice', 'name': 'Alice Johnson', 'total_requests': 3, 'percentage_of_total': 60.0}
+                ],
+                'underutilized_reviewers': [],
+                'reviewer_diversity_score': 0.73
+            }
+        }
+    
+    def teardown_method(self):
+        """Clean up test environment."""
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+    
+    def test_reviewer_analysis_argument_parsing(self):
+        """Test that reviewer analysis arguments are parsed correctly."""
+        # Test basic reviewer analysis mode
+        with patch('sys.argv', ['github_pr_analyzer.py', 'microsoft/vscode', '--analyze-reviewers']):
+            args = parse_arguments()
+            assert args.analyze_reviewers is True
+            assert args.reviewer_threshold == 10  # Default value
+            assert args.include_teams is False  # Default value
+            assert args.reviewer_period is None  # Default value
+        
+        # Test with custom threshold
+        with patch('sys.argv', ['github_pr_analyzer.py', 'facebook/react', '--analyze-reviewers', '--reviewer-threshold', '15']):
+            args = parse_arguments()
+            assert args.analyze_reviewers is True
+            assert args.reviewer_threshold == 15
+        
+        # Test with teams and custom period
+        with patch('sys.argv', [
+            'github_pr_analyzer.py', 'kubernetes/kubernetes', '--analyze-reviewers', 
+            '--include-teams', '--reviewer-period', '6'
+        ]):
+            args = parse_arguments()
+            assert args.analyze_reviewers is True
+            assert args.include_teams is True
+            assert args.reviewer_period == 6
+    
+    def test_reviewer_analysis_input_validation(self):
+        """Test input validation for reviewer analysis parameters."""
+        # Valid reviewer analysis parameters
+        args = Mock()
+        args.repository = "owner/repo"
+        args.months = 3
+        args.output = "test.csv"
+        args.analyze_reviewers = True
+        args.reviewer_threshold = 15
+        args.reviewer_period = 6
+        
+        # Should not raise any exception
+        validate_inputs(args)
+        
+        # Invalid reviewer threshold (too low)
+        args.reviewer_threshold = 0
+        with pytest.raises(ValueError, match="Reviewer threshold must be at least 1"):
+            validate_inputs(args)
+        
+        # Invalid reviewer threshold (too high)
+        args.reviewer_threshold = 1001
+        with pytest.raises(ValueError, match="Reviewer threshold cannot exceed 1000"):
+            validate_inputs(args)
+        
+        # Invalid reviewer period
+        args.reviewer_threshold = 10  # Reset to valid
+        args.reviewer_period = 0
+        with pytest.raises(ValueError, match="Reviewer period must be between 1 and 24"):
+            validate_inputs(args)
+        
+        args.reviewer_period = 25
+        with pytest.raises(ValueError, match="Reviewer period must be between 1 and 24"):
+            validate_inputs(args)
+    
+    def test_auto_filename_generation_for_reviewer_analysis(self):
+        """Test automatic filename generation for reviewer analysis mode."""
+        # Standard PR analysis filename
+        filename = generate_auto_filename("facebook", "react", False)
+        assert filename == "pr_analysis_react.csv"
+        
+        # Reviewer analysis filename
+        filename = generate_auto_filename("facebook", "react", True)
+        assert filename == "reviewer_workload_react.csv"
+        
+        # Handle empty/None inputs
+        filename = generate_auto_filename("", "", True)
+        assert filename == "reviewer_analysis.csv"
+        
+        filename = generate_auto_filename(None, None, True)
+        assert filename == "reviewer_analysis.csv"
+    
+    @patch.dict(os.environ, {'GITHUB_TOKEN': 'test_token'})
+    @patch('github_pr_analyzer.GitHubClient')
+    @patch('github_pr_analyzer.PRAnalyzer')
+    @patch('github_pr_analyzer.ReviewerWorkloadAnalyzer')
+    @patch('github_pr_analyzer.CSVReporter')
+    def test_end_to_end_reviewer_analysis(self, mock_csv_class, mock_reviewer_class, 
+                                         mock_analyzer_class, mock_client_class):
+        """Test complete reviewer analysis workflow."""
+        # Configure mocks
+        mock_client = Mock(spec=GitHubClient)
+        mock_client.validate_token.return_value = True
+        mock_client.get_repository_info.return_value = {'full_name': 'testowner/test-repo'}
+        mock_client_class.return_value = mock_client
+        mock_client_class.get_token_from_env.return_value = 'test_token'
+        
+        mock_pr_analyzer = Mock(spec=PRAnalyzer)
+        mock_pr_analyzer.fetch_monthly_prs.return_value = self.mock_prs_with_reviewers
+        mock_analyzer_class.return_value = mock_pr_analyzer
+        
+        mock_reviewer_analyzer = Mock(spec=ReviewerWorkloadAnalyzer)
+        mock_reviewer_analyzer.get_reviewer_workload_summary.return_value = self.mock_reviewer_summary
+        mock_reviewer_class.return_value = mock_reviewer_analyzer
+        
+        mock_csv_reporter = Mock(spec=CSVReporter)
+        mock_csv_class.return_value = mock_csv_reporter
+        
+        # Test reviewer analysis execution
+        with patch('sys.argv', [
+            'github_pr_analyzer.py', 'testowner/test-repo', 
+            '--analyze-reviewers', '--reviewer-threshold', '5',
+            '--output', str(self.output_file)
+        ]):
+            result = main()
+        
+        # Verify successful execution
+        assert result == 0
+        
+        # Verify method calls
+        mock_client_class.get_token_from_env.assert_called_once()
+        mock_client.validate_token.assert_called_once()
+        mock_client.get_repository_info.assert_called_once_with('testowner', 'test-repo')
+        mock_pr_analyzer.fetch_monthly_prs.assert_called_once_with('testowner', 'test-repo', 1)
+        
+        # Verify reviewer analyzer was called
+        mock_reviewer_class.assert_called_once_with(default_threshold=5)
+        mock_reviewer_analyzer.get_reviewer_workload_summary.assert_called_once_with(
+            self.mock_prs_with_reviewers,
+            threshold=5,
+            include_teams=False,
+            org_name=None
+        )
+    
+    def test_print_reviewer_summary_output(self, capsys):
+        """Test reviewer analysis summary output formatting."""
+        print_reviewer_summary(
+            self.mock_reviewer_summary, 
+            "testowner/test-repo", 
+            3, 
+            "reviewer_analysis.csv"
+        )
+        
+        captured = capsys.readouterr()
+        output = captured.out
+        
+        # Verify key elements in output
+        assert "GitHub PR Reviewer Analysis Results for testowner/test-repo" in output
+        assert "Analysis Period: Last 3 months" in output
+        assert "Total PRs Analyzed: 3" in output
+        assert "Total Review Requests: 5" in output
+        assert "Unique Reviewers: 3" in output
+        assert "Average Requests per Reviewer: 1.7" in output
+        assert "Normal Load: 3 reviewers" in output
+        assert "Top 20% of reviewers handle 60.0% of all requests" in output
+        assert "reviewer_analysis.csv" in output
 
 
 if __name__ == "__main__":

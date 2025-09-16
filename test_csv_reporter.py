@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch, mock_open
 
 from csv_reporter import CSVReporter, CSVReportError
+from datetime import datetime
 
 
 class TestCSVReporter:
@@ -688,6 +689,207 @@ def sample_analysis_results():
             }
         ]
     }
+
+
+class TestReviewerCSVGeneration:
+    """Test reviewer workload analysis CSV generation functionality."""
+    
+    def setup_method(self):
+        """Set up test fixtures for reviewer CSV tests."""
+        self.tmpdir = tempfile.mkdtemp()
+        self.output_file = Path(self.tmpdir) / "reviewer_test.csv"
+        
+        # Mock reviewer summary data
+        self.mock_reviewer_summary = {
+            'metadata': {
+                'analysis_date': '2024-12-15T12:00:00',
+                'total_prs_analyzed': 25,
+                'include_teams': True,
+                'overload_threshold': 15,
+                'org_name': 'testorg'
+            },
+            'reviewer_data': {
+                'alice': {
+                    'login': 'alice',
+                    'name': 'Alice Johnson',
+                    'total_requests': 20,
+                    'pr_numbers': [100, 101, 102, 103, 104],
+                    'request_sources': ['individual', 'individual', 'team:core', 'individual', 'team:backend'],
+                    'first_request_date': '2024-11-01T10:00:00Z',
+                    'last_request_date': '2024-12-10T15:30:00Z'
+                },
+                'bob': {
+                    'login': 'bob',
+                    'name': 'Bob Smith',
+                    'total_requests': 8,
+                    'pr_numbers': [105, 106, 107],
+                    'request_sources': ['individual', 'individual', 'individual'],
+                    'first_request_date': '2024-11-15T09:00:00Z',
+                    'last_request_date': '2024-12-05T14:00:00Z'
+                },
+                'team:frontend': {
+                    'login': 'team:frontend',
+                    'name': 'Team: Frontend',
+                    'total_requests': 12,
+                    'pr_numbers': [108, 109, 110, 111],
+                    'request_sources': ['team:frontend', 'team:frontend', 'team:frontend', 'team:frontend'],
+                    'first_request_date': '2024-11-20T11:00:00Z',
+                    'last_request_date': '2024-12-08T16:00:00Z'
+                }
+            },
+            'statistics': {
+                'total_reviewers': 3,
+                'total_requests': 40,
+                'mean_requests': 13.33,
+                'median_requests': 12,
+                'std_dev_requests': 6.02,
+                'min_requests': 8,
+                'max_requests': 20
+            },
+            'overload_analysis': {
+                'OVERLOADED': ['alice'],
+                'HIGH': ['team:frontend'],
+                'NORMAL': ['bob']
+            },
+            'distribution_analysis': {
+                'concentration_ratio': 0.5,
+                'gini_coefficient': 0.35,
+                'reviewer_diversity_score': 0.65,
+                'top_reviewers': [
+                    {'login': 'alice', 'name': 'Alice Johnson', 'total_requests': 20, 'percentage_of_total': 50.0}
+                ],
+                'underutilized_reviewers': []
+            }
+        }
+    
+    def teardown_method(self):
+        """Clean up test environment."""
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+    
+    def test_generate_reviewer_report_success(self):
+        """Test successful reviewer CSV report generation."""
+        reporter = CSVReporter(self.output_file)
+        
+        output_path = reporter.generate_reviewer_report(self.mock_reviewer_summary)
+        
+        assert output_path == str(self.output_file)
+        assert self.output_file.exists()
+        
+        # Read and verify CSV content
+        with open(self.output_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Check for header comments
+        assert "# GitHub PR Reviewer Workload Analysis Report" in content
+        assert "# Total PRs Analyzed: 25" in content
+        assert "# Overload Threshold: 15 requests" in content
+        assert "# Team Analysis Enabled: True" in content
+        assert "# Organization: testorg" in content
+        assert "# Total Reviewers: 3" in content
+        assert "# Total Review Requests: 40" in content
+        
+        # Check for CSV headers
+        assert "reviewer_login,reviewer_name,reviewer_type" in content
+        assert "total_requests,pr_numbers,request_sources" in content
+        assert "workload_status,workload_category" in content
+        
+        # Check for data rows
+        assert "alice,Alice Johnson,user,20" in content
+        assert "bob,Bob Smith,user,8" in content
+        assert "team:frontend,Team: Frontend,team,12" in content
+    
+    def test_reviewer_csv_headers(self):
+        """Test reviewer CSV header structure."""
+        reporter = CSVReporter(self.output_file)
+        
+        headers = reporter._format_reviewer_csv_headers()
+        
+        expected_headers = [
+            'reviewer_login', 'reviewer_name', 'reviewer_type',
+            'total_requests', 'pr_numbers', 'request_sources',
+            'first_request_date', 'last_request_date', 'avg_requests_per_month',
+            'percentage_of_total', 'workload_status', 'workload_category'
+        ]
+        
+        assert headers == expected_headers
+    
+    def test_reviewer_csv_row_formatting(self):
+        """Test reviewer CSV data row formatting."""
+        reporter = CSVReporter(self.output_file)
+        
+        overload_analysis = self.mock_reviewer_summary['overload_analysis']
+        reviewer_data = self.mock_reviewer_summary['reviewer_data']
+        
+        rows = reporter._format_reviewer_csv_rows(reviewer_data, overload_analysis)
+        
+        # Should have 3 rows
+        assert len(rows) == 3
+        
+        # Rows should be sorted by total requests (descending)
+        assert rows[0][0] == 'alice'  # 20 requests
+        assert rows[1][0] == 'team:frontend'  # 12 requests  
+        assert rows[2][0] == 'bob'  # 8 requests
+        
+        # Check Alice's data (overloaded user)
+        alice_row = rows[0]
+        assert alice_row[0] == 'alice'  # login
+        assert alice_row[1] == 'Alice Johnson'  # name
+        assert alice_row[2] == 'user'  # type
+        assert alice_row[3] == '20'  # total_requests
+        assert '100, 101, 102, 103, 104' in alice_row[4]  # pr_numbers
+        assert alice_row[10] == 'OVERLOADED'  # workload_status
+        assert alice_row[11] == 'Overloaded'  # workload_category
+    
+    def test_validate_reviewer_summary_success(self):
+        """Test successful reviewer summary validation."""
+        reporter = CSVReporter(self.output_file)
+        
+        # Should not raise any exception
+        result = reporter.validate_reviewer_summary(self.mock_reviewer_summary)
+        assert result is True
+    
+    def test_validate_reviewer_summary_invalid_structure(self):
+        """Test reviewer summary validation with invalid structures."""
+        reporter = CSVReporter(self.output_file)
+        
+        # Invalid: not a dictionary
+        with pytest.raises(CSVReportError, match="must be a dictionary"):
+            reporter.validate_reviewer_summary("invalid")
+        
+        # Invalid: missing required keys
+        invalid_summary = {'reviewer_data': {}}
+        with pytest.raises(CSVReportError, match="must contain 'metadata' key"):
+            reporter.validate_reviewer_summary(invalid_summary)
+    
+    def test_generate_reviewer_report_empty_data(self):
+        """Test reviewer report generation with empty data."""
+        reporter = CSVReporter(self.output_file)
+        
+        empty_summary = {
+            'reviewer_data': {},
+            'metadata': {},
+            'statistics': {},
+            'overload_analysis': {'OVERLOADED': [], 'HIGH': [], 'NORMAL': []},
+            'distribution_analysis': {}
+        }
+        
+        output_path = reporter.generate_reviewer_report(empty_summary)
+        
+        assert output_path == str(self.output_file)
+        assert self.output_file.exists()
+        
+        # Read and verify content
+        with open(self.output_file, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Should have headers but no data rows
+        assert "reviewer_login,reviewer_name,reviewer_type" in content
+        lines = content.strip().split('\n')
+        
+        # Count non-comment lines (should be just the header line)
+        non_comment_lines = [line for line in lines if not line.startswith('#') and line.strip()]
+        assert len(non_comment_lines) == 1  # Just the header
 
 
 if __name__ == "__main__":

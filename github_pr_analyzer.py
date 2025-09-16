@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-GitHub PR Lifecycle Time Analysis Tool
+GitHub PR Analysis Tool
 
-This tool analyzes GitHub pull requests to calculate:
-- Time from PR creation to first review activity
-- Time from PR creation to merge
-- Time from first commit to merge (commit lead time)
+This tool analyzes GitHub pull requests for:
+- PR lifecycle times (default mode):
+  * Time from PR creation to first review activity
+  * Time from PR creation to merge
+  * Time from first commit to merge (commit lead time)
+- Reviewer workload analysis (--analyze-reviewers):
+  * Reviewer request distribution and overload detection
+  * Statistical analysis of reviewer assignments
+  * Team-based reviewer analysis and expansion
 
 Usage:
     python github_pr_analyzer.py owner/repo [options]
@@ -14,8 +19,13 @@ Environment Variables:
     GITHUB_TOKEN: GitHub personal access token (required)
 
 Examples:
+    # PR lifecycle analysis (default)
     python github_pr_analyzer.py microsoft/vscode
     python github_pr_analyzer.py facebook/react --months 3 --output react_analysis.csv
+    
+    # Reviewer workload analysis
+    python github_pr_analyzer.py kubernetes/kubernetes --analyze-reviewers
+    python github_pr_analyzer.py facebook/react --analyze-reviewers --reviewer-threshold 15 --include-teams
 """
 
 import argparse
@@ -28,6 +38,7 @@ from typing import Optional, Tuple
 from github_client import GitHubClient, GitHubAPIError, GitHubAuthenticationError
 from pr_analyzer import PRAnalyzer, PRAnalysisError  
 from csv_reporter import CSVReporter, CSVReportError
+from reviewer_analyzer import ReviewerWorkloadAnalyzer
 
 
 def setup_logging(level: str = "INFO", verbose: bool = False) -> None:
@@ -76,13 +87,19 @@ def parse_arguments() -> argparse.Namespace:
         Parsed arguments namespace
     """
     parser = argparse.ArgumentParser(
-        description='Analyze GitHub PR lifecycle times',
+        description='Analyze GitHub pull requests for lifecycle times and reviewer workloads',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # PR lifecycle analysis (default)
   %(prog)s microsoft/vscode
   %(prog)s facebook/react --months 3
   %(prog)s kubernetes/kubernetes --months 6 --output k8s_analysis.csv --verbose
+  
+  # Reviewer workload analysis
+  %(prog)s facebook/react --analyze-reviewers
+  %(prog)s kubernetes/kubernetes --analyze-reviewers --reviewer-threshold 15
+  %(prog)s myorg/myrepo --analyze-reviewers --include-teams --months 6
 
 Environment Variables:
   GITHUB_TOKEN    GitHub personal access token (required)
@@ -162,6 +179,34 @@ Environment Variables:
         help='Suppress all output except errors'
     )
     
+    # Reviewer workload analysis options
+    reviewer_group = parser.add_argument_group('reviewer workload analysis')
+    
+    reviewer_group.add_argument(
+        '--analyze-reviewers',
+        action='store_true',
+        help='Enable reviewer workload analysis mode instead of PR lifecycle analysis'
+    )
+    
+    reviewer_group.add_argument(
+        '--reviewer-threshold',
+        type=int,
+        default=10,
+        help='Threshold for detecting overloaded reviewers (default: 10 requests)'
+    )
+    
+    reviewer_group.add_argument(
+        '--include-teams',
+        action='store_true',
+        help='Include team-based reviewer analysis (expands teams to individual members)'
+    )
+    
+    reviewer_group.add_argument(
+        '--reviewer-period',
+        type=int,
+        help='Time period in months for reviewer analysis (defaults to --months value)'
+    )
+    
     return parser.parse_args()
 
 
@@ -233,6 +278,19 @@ def validate_inputs(args: argparse.Namespace) -> Tuple[str, str]:
     if args.months > 24:
         raise ValueError("Months parameter cannot exceed 24 (2 years)")
     
+    # Validate reviewer analysis specific parameters
+    if hasattr(args, 'analyze_reviewers') and args.analyze_reviewers:
+        if args.reviewer_threshold < 1:
+            raise ValueError("Reviewer threshold must be at least 1")
+        
+        if args.reviewer_threshold > 1000:
+            raise ValueError("Reviewer threshold cannot exceed 1000")
+        
+        # Use reviewer_period if specified, otherwise use months
+        if args.reviewer_period is not None:
+            if args.reviewer_period < 1 or args.reviewer_period > 24:
+                raise ValueError("Reviewer period must be between 1 and 24 months")
+    
     # Validate output path
     output_path = Path(args.output)
     if output_path.exists() and output_path.is_dir():
@@ -281,19 +339,20 @@ def sanitize_repository_name_for_filename(repo_name: str) -> str:
     return sanitized
 
 
-def generate_auto_filename(owner: str, repo: str) -> str:
+def generate_auto_filename(owner: str, repo: str, is_reviewer_analysis: bool = False) -> str:
     """
-    Generate automatic filename based on repository name.
+    Generate automatic filename based on repository name and analysis type.
     
     Args:
         owner: Repository owner (user or organization)
         repo: Repository name
+        is_reviewer_analysis: True if generating filename for reviewer analysis
         
     Returns:
         Auto-generated CSV filename
     """
     if not owner or not repo:
-        return "pr_analysis.csv"
+        return "reviewer_analysis.csv" if is_reviewer_analysis else "pr_analysis.csv"
     
     # Create repository identifier and sanitize it
     repo_identifier = f"{owner}/{repo}"
@@ -302,7 +361,10 @@ def generate_auto_filename(owner: str, repo: str) -> str:
     # Extract just the repo name part for cleaner filename
     repo_part = sanitize_repository_name_for_filename(repo)
     
-    return f"pr_analysis_{repo_part}.csv"
+    if is_reviewer_analysis:
+        return f"reviewer_workload_{repo_part}.csv"
+    else:
+        return f"pr_analysis_{repo_part}.csv"
 
 
 def print_summary(analysis_results: dict, repository: str, months: int, output_path: str) -> None:
@@ -361,6 +423,97 @@ def print_summary(analysis_results: dict, repository: str, months: int, output_p
     print(f"📄 Detailed results saved to: {output_path}")
 
 
+def print_reviewer_summary(reviewer_summary: dict, repository: str, months: int, output_path: str) -> None:
+    """
+    Print reviewer workload analysis summary to stdout.
+    
+    Args:
+        reviewer_summary: Dictionary containing reviewer analysis results
+        repository: Repository name  
+        months: Number of months analyzed
+        output_path: Path to output CSV file
+    """
+    metadata = reviewer_summary.get('metadata', {})
+    statistics = reviewer_summary.get('statistics', {})
+    overload_analysis = reviewer_summary.get('overload_analysis', {})
+    distribution = reviewer_summary.get('distribution_analysis', {})
+    
+    print(f"\nGitHub PR Reviewer Analysis Results for {repository}")
+    print("=" * (50 + len(repository)))
+    print(f"Analysis Period: Last {months} month{'s' if months > 1 else ''}")
+    print(f"Output File: {output_path}")
+    print()
+    
+    # Basic statistics
+    total_prs = metadata.get('total_prs_analyzed', 0)
+    total_reviewers = statistics.get('total_reviewers', 0)
+    total_requests = statistics.get('total_requests', 0)
+    threshold = metadata.get('overload_threshold', 10)
+    
+    print(f"📊 Reviewer Request Statistics:")
+    print(f"  Total PRs Analyzed: {total_prs:,}")
+    print(f"  Total Review Requests: {total_requests:,}")
+    print(f"  Unique Reviewers: {total_reviewers}")
+    
+    if total_reviewers > 0 and total_requests > 0:
+        avg_requests = statistics.get('mean_requests', 0)
+        print(f"  Average Requests per Reviewer: {avg_requests:.1f}")
+    print()
+    
+    # Overload analysis
+    overloaded = overload_analysis.get('OVERLOADED', [])
+    high = overload_analysis.get('HIGH', [])
+    normal = overload_analysis.get('NORMAL', [])
+    
+    if overloaded:
+        print(f"⚠️  Potentially Overloaded Reviewers (≥{threshold} requests):")
+        for reviewer in overloaded[:5]:  # Show top 5 overloaded reviewers
+            reviewer_data = reviewer_summary.get('reviewer_data', {}).get(reviewer, {})
+            request_count = reviewer_data.get('total_requests', 0)
+            avg_requests = statistics.get('mean_requests', 1)
+            percentage = (request_count / avg_requests * 100) if avg_requests > 0 else 0
+            print(f"  - {reviewer}: {request_count} requests ({percentage:.0f}% of average)")
+        
+        if len(overloaded) > 5:
+            print(f"  ... and {len(overloaded) - 5} more")
+        print()
+    
+    # Distribution insights
+    if distribution:
+        concentration = distribution.get('concentration_ratio', 0)
+        gini = distribution.get('gini_coefficient', 0)
+        diversity = distribution.get('reviewer_diversity_score', 0)
+        
+        print("📈 Request Distribution:")
+        print(f"  Top 20% of reviewers handle {concentration:.1%} of all requests")
+        if gini > 0.6:
+            print(f"  High inequality in reviewer assignments (Gini: {gini:.2f})")
+        elif gini > 0.4:
+            print(f"  Moderate inequality in reviewer assignments (Gini: {gini:.2f})")
+        else:
+            print(f"  Relatively equal reviewer assignment distribution (Gini: {gini:.2f})")
+        
+        print(f"  Reviewer diversity score: {diversity:.2f} (higher = more balanced)")
+        
+        # Show underutilized reviewers
+        underutilized = distribution.get('underutilized_reviewers', [])
+        if underutilized:
+            print(f"  {len(underutilized)} reviewers have very low request counts")
+        print()
+    
+    # Summary counts
+    print("📊 Workload Categories:")
+    print(f"  Normal Load: {len(normal)} reviewers")
+    print(f"  High Load: {len(high)} reviewers")
+    print(f"  Overloaded: {len(overloaded)} reviewers")
+    
+    if metadata.get('include_teams'):
+        print("  (Analysis includes team-based reviewer requests)")
+    
+    print()
+    print(f"📄 Detailed results saved to: {output_path}")
+
+
 def main() -> int:
     """
     Main application entry point.
@@ -409,11 +562,13 @@ def main() -> int:
         
         # Generate auto filename if default output is being used (and not running utility commands)
         if not args.check_rate_limit and not args.get_username and args.output == 'pr_analysis.csv':  # Default value from argument parser
-            args.output = generate_auto_filename(owner, repo)
+            is_reviewer_mode = getattr(args, 'analyze_reviewers', False)
+            args.output = generate_auto_filename(owner, repo, is_reviewer_mode)
             logger.info(f"Auto-generated output filename: {args.output}")
         
         if not args.check_rate_limit and not args.get_username:
-            logger.info(f"Starting GitHub PR analysis for {owner}/{repo}")
+            analysis_mode = "reviewer workload analysis" if getattr(args, 'analyze_reviewers', False) else "PR lifecycle analysis"
+            logger.info(f"Starting GitHub {analysis_mode} for {owner}/{repo}")
             logger.info(f"Analysis period: Last {args.months} month{'s' if args.months > 1 else ''}")
             logger.info(f"Output file: {args.output}")
         
@@ -508,12 +663,18 @@ def main() -> int:
         # Initialize PR analyzer
         pr_analyzer = PRAnalyzer(github_client)
         
+        # Determine analysis period (use reviewer_period if specified and in reviewer mode)
+        analysis_months = args.months
+        if getattr(args, 'analyze_reviewers', False) and args.reviewer_period:
+            analysis_months = args.reviewer_period
+            logger.info(f"Using reviewer-specific analysis period: {analysis_months} month{'s' if analysis_months > 1 else ''}")
+        
         # Fetch PRs
-        logger.info(f"Fetching PRs from last {args.months} month{'s' if args.months > 1 else ''}...")
+        logger.info(f"Fetching PRs from last {analysis_months} month{'s' if analysis_months > 1 else ''}...")
         try:
-            prs = pr_analyzer.fetch_monthly_prs(owner, repo, args.months)
+            prs = pr_analyzer.fetch_monthly_prs(owner, repo, analysis_months)
             if not prs:
-                print(f"\n⚠️  No PRs found in {owner}/{repo} for the last {args.months} month{'s' if args.months > 1 else ''}")
+                print(f"\n⚠️  No PRs found in {owner}/{repo} for the last {analysis_months} month{'s' if analysis_months > 1 else ''}")
                 return 0
             
             logger.info(f"Found {len(prs)} PRs to analyze")
@@ -523,26 +684,70 @@ def main() -> int:
             print(f"\n❌ Failed to fetch PRs: {e}")
             return 1
         
-        # Perform analysis with rate limiting parameters
-        logger.info("Analyzing PR lifecycle times...")
-        try:
-            analysis_results = pr_analyzer.analyze_pr_lifecycle_times(
-                prs, owner, repo, 
-                batch_size=args.batch_size,
-                batch_delay=args.batch_delay,
-                max_retries=args.max_retries
-            )
-        except PRAnalysisError as e:
-            logger.error(f"Analysis failed: {e}")
-            print(f"\n❌ Analysis failed: {e}")
-            return 1
+        # Check if we should perform reviewer analysis or PR lifecycle analysis
+        if getattr(args, 'analyze_reviewers', False):
+            # Reviewer workload analysis mode
+            logger.info("Analyzing reviewer workload patterns...")
+            
+            try:
+                # Initialize reviewer analyzer
+                reviewer_analyzer = ReviewerWorkloadAnalyzer(default_threshold=args.reviewer_threshold)
+                
+                # Extract organization name for team expansion
+                # Use the owner as org name - in a real scenario you might need more sophisticated org detection
+                org_name = owner if args.include_teams else None
+                
+                if args.include_teams:
+                    logger.info(f"Team-based analysis enabled, using organization: {org_name}")
+                
+                # Perform reviewer workload summary
+                reviewer_summary = reviewer_analyzer.get_reviewer_workload_summary(
+                    prs,
+                    threshold=args.reviewer_threshold,
+                    include_teams=args.include_teams,
+                    org_name=org_name
+                )
+                
+                logger.info(f"Analyzed {reviewer_summary['statistics']['total_reviewers']} reviewers across {len(prs)} PRs")
+                
+                # For now, we'll prepare the summary for CSV output (Phase 4 will handle CSV generation)
+                analysis_results = reviewer_summary
+                
+            except Exception as e:
+                logger.error(f"Reviewer analysis failed: {e}")
+                print(f"\n❌ Reviewer analysis failed: {e}")
+                return 1
+        
+        else:
+            # PR lifecycle analysis mode (original functionality)
+            logger.info("Analyzing PR lifecycle times...")
+            try:
+                analysis_results = pr_analyzer.analyze_pr_lifecycle_times(
+                    prs, owner, repo, 
+                    batch_size=args.batch_size,
+                    batch_delay=args.batch_delay,
+                    max_retries=args.max_retries
+                )
+            except PRAnalysisError as e:
+                logger.error(f"Analysis failed: {e}")
+                print(f"\n❌ Analysis failed: {e}")
+                return 1
         
         # Generate CSV report
         logger.info(f"Generating CSV report: {args.output}")
         try:
             csv_reporter = CSVReporter(args.output)
-            csv_reporter.validate_analysis_results(analysis_results)
-            output_file = csv_reporter.generate_report(analysis_results)
+            
+            if getattr(args, 'analyze_reviewers', False):
+                # Reviewer analysis CSV generation
+                csv_reporter.validate_reviewer_summary(analysis_results)
+                output_file = csv_reporter.generate_reviewer_report(analysis_results)
+                logger.info("Successfully generated reviewer workload analysis CSV report")
+            else:
+                # PR lifecycle analysis CSV generation (original functionality)
+                csv_reporter.validate_analysis_results(analysis_results)
+                output_file = csv_reporter.generate_report(analysis_results)
+                logger.info("Successfully generated PR lifecycle analysis CSV report")
             
         except CSVReportError as e:
             logger.error(f"CSV generation failed: {e}")
@@ -551,7 +756,10 @@ def main() -> int:
         
         # Print summary (unless quiet mode)
         if not args.quiet:
-            print_summary(analysis_results, f"{owner}/{repo}", args.months, output_file)
+            if getattr(args, 'analyze_reviewers', False):
+                print_reviewer_summary(analysis_results, f"{owner}/{repo}", analysis_months, output_file)
+            else:
+                print_summary(analysis_results, f"{owner}/{repo}", analysis_months, output_file)
         
         logger.info("Analysis completed successfully")
         return 0
