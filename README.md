@@ -103,6 +103,7 @@ python github_pr_analyzer.py owner/repository [OPTIONS]
 
 General Options:
   --months MONTHS                 Number of months to look back (default: 1)
+  --month YYYY-MM                 Analyze a specific month (e.g., 2024-11). Overrides --months
   --output, -o OUTPUT            Output CSV file path (auto-generated if not specified)
   --verbose, -v                  Enable verbose logging
   --debug                        Enable debug logging
@@ -148,6 +149,20 @@ source venv/bin/activate
 python github_pr_analyzer.py kubernetes/kubernetes --months 6 --output k8s_analysis.csv --verbose
 ```
 
+**Analyze PRs from a specific month (November 2024):**
+
+```bash
+source venv/bin/activate
+python github_pr_analyzer.py microsoft/vscode --month 2024-11
+```
+
+**Analyze PRs from October 2024 with custom output:**
+
+```bash
+source venv/bin/activate
+python github_pr_analyzer.py facebook/react --month 2024-10 --output react_oct_2024.csv
+```
+
 #### Reviewer Workload Analysis
 
 **Basic reviewer analysis:**
@@ -171,6 +186,13 @@ source venv/bin/activate
 python github_pr_analyzer.py myorg/myrepo --analyze-reviewers --reviewer-period 6 --output custom_reviewer_analysis.csv
 ```
 
+**Analyze reviewer workload for a specific month:**
+
+```bash
+source venv/bin/activate
+python github_pr_analyzer.py myorg/myrepo --analyze-reviewers --month 2024-11
+```
+
 ## Output
 
 ### Console Output
@@ -190,7 +212,7 @@ Example:
 GitHub PR Analysis Results for facebook/react
 =============================================
 Analysis Period: Last 3 months
-Output File: pr_analysis_react.csv
+Output File: pr_analysis_react_2024-09-11.csv
 
 📊 Summary Statistics:
   Total PRs Analyzed: 245
