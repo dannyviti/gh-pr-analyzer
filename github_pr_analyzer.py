@@ -19,9 +19,12 @@ Environment Variables:
     GITHUB_TOKEN: GitHub personal access token (required)
 
 Examples:
-    # PR lifecycle analysis (default)
+    # PR lifecycle analysis (default) - last N months
     python github_pr_analyzer.py microsoft/vscode
     python github_pr_analyzer.py facebook/react --months 3 --output react_analysis.csv
+    
+    # PR lifecycle analysis - specific month
+    python github_pr_analyzer.py microsoft/vscode --month 2024-11
     
     # Reviewer workload analysis
     python github_pr_analyzer.py kubernetes/kubernetes --analyze-reviewers
@@ -32,8 +35,11 @@ import argparse
 import logging
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
+
+from dateutil.relativedelta import relativedelta
 
 from github_client import GitHubClient, GitHubAPIError, GitHubAuthenticationError
 from pr_analyzer import PRAnalyzer, PRAnalysisError  
@@ -91,15 +97,20 @@ def parse_arguments() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # PR lifecycle analysis (default)
+  # PR lifecycle analysis (default) - last N months
   %(prog)s microsoft/vscode
   %(prog)s facebook/react --months 3
   %(prog)s kubernetes/kubernetes --months 6 --output k8s_analysis.csv --verbose
+  
+  # PR lifecycle analysis - specific month
+  %(prog)s microsoft/vscode --month 2024-11
+  %(prog)s facebook/react --month 2024-10
   
   # Reviewer workload analysis
   %(prog)s facebook/react --analyze-reviewers
   %(prog)s kubernetes/kubernetes --analyze-reviewers --reviewer-threshold 15
   %(prog)s myorg/myrepo --analyze-reviewers --include-teams --months 6
+  %(prog)s myorg/myrepo --analyze-reviewers --month 2024-11
 
 Environment Variables:
   GITHUB_TOKEN    GitHub personal access token (required)
@@ -117,6 +128,13 @@ Environment Variables:
         type=int,
         default=1,
         help='Number of months to look back (default: 1)'
+    )
+    
+    parser.add_argument(
+        '--month',
+        type=str,
+        metavar='YYYY-MM',
+        help='Specific month to analyze (format: YYYY-MM, e.g., 2024-11). Overrides --months.'
     )
     
     parser.add_argument(
@@ -271,12 +289,22 @@ def validate_inputs(args: argparse.Namespace) -> Tuple[str, str]:
     if not owner or not repo:
         raise ValueError("Both owner and repository name must be non-empty")
     
-    # Validate months parameter
-    if args.months < 1:
-        raise ValueError("Months parameter must be at least 1")
-    
-    if args.months > 24:
-        raise ValueError("Months parameter cannot exceed 24 (2 years)")
+    # Validate specific month if provided
+    if args.month:
+        try:
+            start_date, end_date = parse_specific_month(args.month)
+            # Check if the month is in the future
+            if start_date > datetime.now():
+                raise ValueError(f"Cannot analyze future month: {args.month}")
+        except ValueError as e:
+            raise ValueError(str(e))
+    else:
+        # Validate months parameter (only if --month not specified)
+        if args.months < 1:
+            raise ValueError("Months parameter must be at least 1")
+        
+        if args.months > 24:
+            raise ValueError("Months parameter cannot exceed 24 (2 years)")
     
     # Validate reviewer analysis specific parameters
     if hasattr(args, 'analyze_reviewers') and args.analyze_reviewers:
@@ -305,6 +333,45 @@ def validate_inputs(args: argparse.Namespace) -> Tuple[str, str]:
             raise ValueError(f"Cannot create output directory: {output_dir}")
     
     return owner.strip(), repo.strip()
+
+
+def parse_specific_month(month_str: str) -> Tuple[datetime, datetime]:
+    """
+    Parse a month string (YYYY-MM) and return the start and end dates for that month.
+    
+    Args:
+        month_str: Month string in YYYY-MM format (e.g., "2024-11")
+        
+    Returns:
+        Tuple of (start_date, end_date) for the specified month
+        
+    Raises:
+        ValueError: If the month string is invalid
+    """
+    try:
+        # Parse the month string
+        year, month = month_str.split('-')
+        year = int(year)
+        month = int(month)
+        
+        if month < 1 or month > 12:
+            raise ValueError(f"Month must be between 1 and 12, got {month}")
+        
+        if year < 2000 or year > 2100:
+            raise ValueError(f"Year must be between 2000 and 2100, got {year}")
+        
+        # Start of the month (first day at midnight)
+        start_date = datetime(year, month, 1, 0, 0, 0)
+        
+        # End of the month (first day of next month)
+        end_date = start_date + relativedelta(months=1)
+        
+        return start_date, end_date
+        
+    except ValueError as e:
+        if "not enough values to unpack" in str(e) or "invalid literal" in str(e):
+            raise ValueError(f"Invalid month format '{month_str}'. Expected YYYY-MM (e.g., 2024-11)")
+        raise
 
 
 def sanitize_repository_name_for_filename(repo_name: str) -> str:
@@ -339,20 +406,36 @@ def sanitize_repository_name_for_filename(repo_name: str) -> str:
     return sanitized
 
 
-def generate_auto_filename(owner: str, repo: str, is_reviewer_analysis: bool = False) -> str:
+def generate_auto_filename(owner: str, repo: str, months: int = 1, 
+                          specific_month: Optional[str] = None,
+                          is_reviewer_analysis: bool = False) -> str:
     """
-    Generate automatic filename based on repository name and analysis type.
+    Generate automatic filename based on repository name, analysis type, and start date.
     
     Args:
         owner: Repository owner (user or organization)
         repo: Repository name
+        months: Number of months to look back (used to calculate start date)
+        specific_month: Specific month string (YYYY-MM format) - overrides months if provided
         is_reviewer_analysis: True if generating filename for reviewer analysis
         
     Returns:
-        Auto-generated CSV filename
+        Auto-generated CSV filename with start date (format: prefix_repo_YYYY-MM-DD.csv)
     """
+    # Calculate the start date of the analysis period
+    if specific_month:
+        # Use the specific month as the date string (just YYYY-MM, no day needed)
+        date_str = specific_month
+    else:
+        # Calculate from months back (same logic as _calculate_date_range)
+        start_date = datetime.now() - relativedelta(months=months)
+        date_str = start_date.strftime("%Y-%m-%d")
+    
     if not owner or not repo:
-        return "reviewer_analysis.csv" if is_reviewer_analysis else "pr_analysis.csv"
+        if is_reviewer_analysis:
+            return f"reviewer_analysis_{date_str}.csv"
+        else:
+            return f"pr_analysis_{date_str}.csv"
     
     # Create repository identifier and sanitize it
     repo_identifier = f"{owner}/{repo}"
@@ -362,26 +445,26 @@ def generate_auto_filename(owner: str, repo: str, is_reviewer_analysis: bool = F
     repo_part = sanitize_repository_name_for_filename(repo)
     
     if is_reviewer_analysis:
-        return f"reviewer_workload_{repo_part}.csv"
+        return f"reviewer_workload_{repo_part}_{date_str}.csv"
     else:
-        return f"pr_analysis_{repo_part}.csv"
+        return f"pr_analysis_{repo_part}_{date_str}.csv"
 
 
-def print_summary(analysis_results: dict, repository: str, months: int, output_path: str) -> None:
+def print_summary(analysis_results: dict, repository: str, period: str, output_path: str) -> None:
     """
     Print analysis summary to stdout.
     
     Args:
         analysis_results: Dictionary containing analysis results
         repository: Repository name
-        months: Number of months analyzed
+        period: Analysis period description (e.g., "Last 1 month" or "2024-11")
         output_path: Path to output CSV file
     """
     summary = analysis_results.get('summary', {})
     
     print(f"\nGitHub PR Analysis Results for {repository}")
     print("=" * (35 + len(repository)))
-    print(f"Analysis Period: Last {months} month{'s' if months > 1 else ''}")
+    print(f"Analysis Period: {period}")
     print(f"Output File: {output_path}")
     print()
     
@@ -423,14 +506,14 @@ def print_summary(analysis_results: dict, repository: str, months: int, output_p
     print(f"📄 Detailed results saved to: {output_path}")
 
 
-def print_reviewer_summary(reviewer_summary: dict, repository: str, months: int, output_path: str) -> None:
+def print_reviewer_summary(reviewer_summary: dict, repository: str, period: str, output_path: str) -> None:
     """
     Print reviewer workload analysis summary to stdout.
     
     Args:
         reviewer_summary: Dictionary containing reviewer analysis results
         repository: Repository name  
-        months: Number of months analyzed
+        period: Analysis period description (e.g., "Last 1 month" or "2024-11")
         output_path: Path to output CSV file
     """
     metadata = reviewer_summary.get('metadata', {})
@@ -440,7 +523,7 @@ def print_reviewer_summary(reviewer_summary: dict, repository: str, months: int,
     
     print(f"\nGitHub PR Reviewer Analysis Results for {repository}")
     print("=" * (50 + len(repository)))
-    print(f"Analysis Period: Last {months} month{'s' if months > 1 else ''}")
+    print(f"Analysis Period: {period}")
     print(f"Output File: {output_path}")
     print()
     
@@ -563,13 +646,25 @@ def main() -> int:
         # Generate auto filename if default output is being used (and not running utility commands)
         if not args.check_rate_limit and not args.get_username and args.output == 'pr_analysis.csv':  # Default value from argument parser
             is_reviewer_mode = getattr(args, 'analyze_reviewers', False)
-            args.output = generate_auto_filename(owner, repo, is_reviewer_mode)
+            # Use reviewer_period if specified for reviewer mode, otherwise use months
+            analysis_months_for_filename = args.months
+            if is_reviewer_mode and args.reviewer_period:
+                analysis_months_for_filename = args.reviewer_period
+            # Pass specific_month if provided
+            args.output = generate_auto_filename(
+                owner, repo, analysis_months_for_filename, 
+                specific_month=args.month,
+                is_reviewer_analysis=is_reviewer_mode
+            )
             logger.info(f"Auto-generated output filename: {args.output}")
         
         if not args.check_rate_limit and not args.get_username:
             analysis_mode = "reviewer workload analysis" if getattr(args, 'analyze_reviewers', False) else "PR lifecycle analysis"
             logger.info(f"Starting GitHub {analysis_mode} for {owner}/{repo}")
-            logger.info(f"Analysis period: Last {args.months} month{'s' if args.months > 1 else ''}")
+            if args.month:
+                logger.info(f"Analysis period: {args.month}")
+            else:
+                logger.info(f"Analysis period: Last {args.months} month{'s' if args.months > 1 else ''}")
             logger.info(f"Output file: {args.output}")
         
         # Initialize GitHub client
@@ -669,12 +764,22 @@ def main() -> int:
             analysis_months = args.reviewer_period
             logger.info(f"Using reviewer-specific analysis period: {analysis_months} month{'s' if analysis_months > 1 else ''}")
         
-        # Fetch PRs
-        logger.info(f"Fetching PRs from last {analysis_months} month{'s' if analysis_months > 1 else ''}...")
+        # Fetch PRs - either for a specific month or for the last N months
         try:
-            prs = pr_analyzer.fetch_monthly_prs(owner, repo, analysis_months)
+            if args.month:
+                # Specific month mode
+                start_date, end_date = parse_specific_month(args.month)
+                logger.info(f"Fetching PRs for {args.month}...")
+                prs = pr_analyzer.fetch_specific_month_prs(owner, repo, start_date, end_date)
+                period_description = args.month
+            else:
+                # Last N months mode
+                logger.info(f"Fetching PRs from last {analysis_months} month{'s' if analysis_months > 1 else ''}...")
+                prs = pr_analyzer.fetch_monthly_prs(owner, repo, analysis_months)
+                period_description = f"the last {analysis_months} month{'s' if analysis_months > 1 else ''}"
+            
             if not prs:
-                print(f"\n⚠️  No PRs found in {owner}/{repo} for the last {analysis_months} month{'s' if analysis_months > 1 else ''}")
+                print(f"\n⚠️  No PRs found in {owner}/{repo} for {period_description}")
                 return 0
             
             logger.info(f"Found {len(prs)} PRs to analyze")
@@ -756,10 +861,16 @@ def main() -> int:
         
         # Print summary (unless quiet mode)
         if not args.quiet:
-            if getattr(args, 'analyze_reviewers', False):
-                print_reviewer_summary(analysis_results, f"{owner}/{repo}", analysis_months, output_file)
+            # Build period description for display
+            if args.month:
+                period_str = args.month
             else:
-                print_summary(analysis_results, f"{owner}/{repo}", analysis_months, output_file)
+                period_str = f"Last {analysis_months} month{'s' if analysis_months > 1 else ''}"
+            
+            if getattr(args, 'analyze_reviewers', False):
+                print_reviewer_summary(analysis_results, f"{owner}/{repo}", period_str, output_file)
+            else:
+                print_summary(analysis_results, f"{owner}/{repo}", period_str, output_file)
         
         logger.info("Analysis completed successfully")
         return 0

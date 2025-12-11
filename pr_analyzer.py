@@ -89,13 +89,58 @@ class PRAnalyzer:
         except Exception as e:
             raise PRAnalysisError(f"Failed to fetch monthly PRs: {e}")
     
-    def _filter_prs_by_date(self, prs: List[Dict[str, Any]], since_date: datetime) -> List[Dict[str, Any]]:
+    def fetch_specific_month_prs(self, owner: str, repo: str, 
+                                  start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
+        """
+        Fetch PR data for a specific date range (typically a single month).
+        
+        Args:
+            owner: Repository owner (user or organization)
+            repo: Repository name
+            start_date: Start of the date range (inclusive)
+            end_date: End of the date range (exclusive)
+            
+        Returns:
+            List of pull request data dictionaries filtered to the specified date range
+            
+        Raises:
+            PRAnalysisError: If data collection fails
+            GitHubAPIError: If GitHub API requests fail
+        """
+        if not owner or not repo:
+            raise PRAnalysisError("Repository owner and name are required")
+        
+        if start_date >= end_date:
+            raise PRAnalysisError("start_date must be before end_date")
+        
+        try:
+            self.logger.info(f"Fetching PRs from {owner}/{repo} for {start_date.strftime('%Y-%m')}")
+            
+            # Fetch all PRs from the start date
+            prs = self.github_client.get_pull_requests(owner, repo, start_date)
+            
+            # Filter to only include PRs within the specific date range
+            filtered_prs = self._filter_prs_by_date(prs, start_date, end_date)
+            
+            self.logger.info(f"Successfully collected {len(filtered_prs)} PRs from {owner}/{repo} for {start_date.strftime('%Y-%m')}")
+            
+            return filtered_prs
+            
+        except GitHubAPIError:
+            # Re-raise GitHub API errors without wrapping
+            raise
+        except Exception as e:
+            raise PRAnalysisError(f"Failed to fetch PRs for specific month: {e}")
+    
+    def _filter_prs_by_date(self, prs: List[Dict[str, Any]], since_date: datetime, 
+                            until_date: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """
         Filter pull requests to only include those created within the specified date range.
         
         Args:
             prs: List of pull request data dictionaries
             since_date: Only include PRs created on or after this date
+            until_date: Only include PRs created before this date (optional, exclusive)
             
         Returns:
             List of pull requests filtered by creation date
@@ -128,9 +173,18 @@ class PRAnalyzer:
                     if pr_created.tzinfo is not None and since_date.tzinfo is None:
                         pr_created = pr_created.replace(tzinfo=None)
                     
+                    # Check if PR is within date range
                     if pr_created >= since_date:
-                        filtered_prs.append(pr)
-                        self.logger.debug(f"Included PR #{pr.get('number')} created at {pr_created}")
+                        # If until_date is specified, also check upper bound
+                        if until_date is not None:
+                            if pr_created < until_date:
+                                filtered_prs.append(pr)
+                                self.logger.debug(f"Included PR #{pr.get('number')} created at {pr_created}")
+                            else:
+                                self.logger.debug(f"Filtered out PR #{pr.get('number')} created at {pr_created} (after {until_date})")
+                        else:
+                            filtered_prs.append(pr)
+                            self.logger.debug(f"Included PR #{pr.get('number')} created at {pr_created}")
                     else:
                         self.logger.debug(f"Filtered out PR #{pr.get('number')} created at {pr_created} (before {since_date})")
                         
@@ -138,7 +192,10 @@ class PRAnalyzer:
                     self.logger.warning(f"Failed to parse date for PR #{pr.get('number', 'unknown')}: {e}")
                     continue
             
-            self.logger.info(f"Filtered {len(prs)} PRs down to {len(filtered_prs)} within date range")
+            date_range_str = f"from {since_date}"
+            if until_date:
+                date_range_str += f" to {until_date}"
+            self.logger.info(f"Filtered {len(prs)} PRs down to {len(filtered_prs)} within date range ({date_range_str})")
             
         except Exception as e:
             raise PRAnalysisError(f"Failed to filter PRs by date: {e}")

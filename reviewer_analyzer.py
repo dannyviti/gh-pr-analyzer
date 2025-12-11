@@ -202,6 +202,13 @@ class ReviewerWorkloadAnalyzer:
             else:
                 categorized['NORMAL'].append(login)
         
+        # Sort each category by total_requests descending
+        for category in categorized:
+            categorized[category].sort(
+                key=lambda login: reviewer_data.get(login, {}).get('total_requests', 0),
+                reverse=True
+            )
+        
         self.logger.info(
             f"Overload detection (threshold={threshold}): "
             f"{len(categorized['OVERLOADED'])} overloaded, "
