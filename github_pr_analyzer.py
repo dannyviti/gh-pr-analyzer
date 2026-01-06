@@ -11,6 +11,9 @@ This tool analyzes GitHub pull requests for:
   * Reviewer request distribution and overload detection
   * Statistical analysis of reviewer assignments
   * Team-based reviewer analysis and expansion
+- Time-series tracking (--tracking-csv):
+  * Append summary metrics to a tracking CSV for Excel graphing
+  * Track trends over time by running monthly
 
 Usage:
     python github_pr_analyzer.py owner/repo [options]
@@ -29,6 +32,9 @@ Examples:
     # Reviewer workload analysis
     python github_pr_analyzer.py kubernetes/kubernetes --analyze-reviewers
     python github_pr_analyzer.py facebook/react --analyze-reviewers --reviewer-threshold 15 --include-teams
+    
+    # Time-series tracking for Excel
+    python github_pr_analyzer.py myorg/myrepo --month 2024-11 --tracking-csv
 """
 
 import argparse
@@ -111,6 +117,10 @@ Examples:
   %(prog)s kubernetes/kubernetes --analyze-reviewers --reviewer-threshold 15
   %(prog)s myorg/myrepo --analyze-reviewers --include-teams --months 6
   %(prog)s myorg/myrepo --analyze-reviewers --month 2024-11
+  
+  # Time-series tracking (for Excel graphing)
+  %(prog)s myorg/myrepo --month 2024-11 --tracking-csv
+  %(prog)s myorg/myrepo --month 2024-12 --tracking-csv
 
 Environment Variables:
   GITHUB_TOKEN    GitHub personal access token (required)
@@ -195,6 +205,12 @@ Environment Variables:
         '--quiet', '-q',
         action='store_true',
         help='Suppress all output except errors'
+    )
+    
+    parser.add_argument(
+        '--tracking-csv',
+        action='store_true',
+        help='Append summary metrics to a tracking CSV (pr_tracking_<repo>.csv) for time-series analysis'
     )
     
     # Reviewer workload analysis options
@@ -372,6 +388,34 @@ def parse_specific_month(month_str: str) -> Tuple[datetime, datetime]:
         if "not enough values to unpack" in str(e) or "invalid literal" in str(e):
             raise ValueError(f"Invalid month format '{month_str}'. Expected YYYY-MM (e.g., 2024-11)")
         raise
+
+
+def generate_tracking_filename(repo: str) -> str:
+    """
+    Generate tracking CSV filename based on repository name.
+    
+    Args:
+        repo: Repository name (just the repo part, not owner/repo)
+        
+    Returns:
+        Tracking CSV filename (e.g., pr_tracking_vscode.csv)
+    """
+    sanitized_repo = sanitize_repository_name_for_filename(repo)
+    return f"pr_tracking_{sanitized_repo}.csv"
+
+
+def generate_reviewer_tracking_filename(repo: str) -> str:
+    """
+    Generate reviewer tracking CSV filename based on repository name.
+    
+    Args:
+        repo: Repository name (just the repo part, not owner/repo)
+        
+    Returns:
+        Reviewer tracking CSV filename (e.g., pr_tracking_reviewers_vscode.csv)
+    """
+    sanitized_repo = sanitize_repository_name_for_filename(repo)
+    return f"pr_tracking_reviewers_{sanitized_repo}.csv"
 
 
 def sanitize_repository_name_for_filename(repo_name: str) -> str:
@@ -789,9 +833,30 @@ def main() -> int:
             print(f"\n❌ Failed to fetch PRs: {e}")
             return 1
         
-        # Check if we should perform reviewer analysis or PR lifecycle analysis
-        if getattr(args, 'analyze_reviewers', False):
-            # Reviewer workload analysis mode
+        # Determine if we need both analyses (for tracking mode)
+        run_pr_analysis = not getattr(args, 'analyze_reviewers', False) or args.tracking_csv
+        run_reviewer_analysis = getattr(args, 'analyze_reviewers', False) or args.tracking_csv
+        
+        pr_analysis_results = None
+        reviewer_analysis_results = None
+        
+        # Run PR lifecycle analysis if needed
+        if run_pr_analysis:
+            logger.info("Analyzing PR lifecycle times...")
+            try:
+                pr_analysis_results = pr_analyzer.analyze_pr_lifecycle_times(
+                    prs, owner, repo, 
+                    batch_size=args.batch_size,
+                    batch_delay=args.batch_delay,
+                    max_retries=args.max_retries
+                )
+            except PRAnalysisError as e:
+                logger.error(f"PR analysis failed: {e}")
+                print(f"\n❌ PR analysis failed: {e}")
+                return 1
+        
+        # Run reviewer workload analysis if needed
+        if run_reviewer_analysis:
             logger.info("Analyzing reviewer workload patterns...")
             
             try:
@@ -799,44 +864,31 @@ def main() -> int:
                 reviewer_analyzer = ReviewerWorkloadAnalyzer(default_threshold=args.reviewer_threshold)
                 
                 # Extract organization name for team expansion
-                # Use the owner as org name - in a real scenario you might need more sophisticated org detection
                 org_name = owner if args.include_teams else None
                 
                 if args.include_teams:
                     logger.info(f"Team-based analysis enabled, using organization: {org_name}")
                 
                 # Perform reviewer workload summary
-                reviewer_summary = reviewer_analyzer.get_reviewer_workload_summary(
+                reviewer_analysis_results = reviewer_analyzer.get_reviewer_workload_summary(
                     prs,
                     threshold=args.reviewer_threshold,
                     include_teams=args.include_teams,
                     org_name=org_name
                 )
                 
-                logger.info(f"Analyzed {reviewer_summary['statistics']['total_reviewers']} reviewers across {len(prs)} PRs")
-                
-                # For now, we'll prepare the summary for CSV output (Phase 4 will handle CSV generation)
-                analysis_results = reviewer_summary
+                logger.info(f"Analyzed {reviewer_analysis_results['statistics']['total_reviewers']} reviewers across {len(prs)} PRs")
                 
             except Exception as e:
                 logger.error(f"Reviewer analysis failed: {e}")
                 print(f"\n❌ Reviewer analysis failed: {e}")
                 return 1
         
+        # Set primary analysis results based on mode (for CSV output and summary display)
+        if getattr(args, 'analyze_reviewers', False):
+            analysis_results = reviewer_analysis_results
         else:
-            # PR lifecycle analysis mode (original functionality)
-            logger.info("Analyzing PR lifecycle times...")
-            try:
-                analysis_results = pr_analyzer.analyze_pr_lifecycle_times(
-                    prs, owner, repo, 
-                    batch_size=args.batch_size,
-                    batch_delay=args.batch_delay,
-                    max_retries=args.max_retries
-                )
-            except PRAnalysisError as e:
-                logger.error(f"Analysis failed: {e}")
-                print(f"\n❌ Analysis failed: {e}")
-                return 1
+            analysis_results = pr_analysis_results
         
         # Generate CSV report
         logger.info(f"Generating CSV report: {args.output}")
@@ -858,6 +910,48 @@ def main() -> int:
             logger.error(f"CSV generation failed: {e}")
             print(f"\n❌ Failed to generate CSV report: {e}")
             return 1
+        
+        # Generate tracking CSV if requested
+        if args.tracking_csv:
+            try:
+                tracking_filename = generate_tracking_filename(repo)
+                
+                # Build period string for tracking
+                if args.month:
+                    tracking_period = args.month
+                else:
+                    # Calculate the start date for the period
+                    start_date = datetime.now() - relativedelta(months=analysis_months)
+                    tracking_period = start_date.strftime("%Y-%m")
+                
+                csv_reporter.append_tracking_row(
+                    tracking_file=tracking_filename,
+                    period=tracking_period,
+                    repository=f"{owner}/{repo}",
+                    pr_summary=pr_analysis_results,
+                    reviewer_summary=reviewer_analysis_results
+                )
+                
+                # Also append reviewer-level tracking data
+                reviewer_tracking_filename = generate_reviewer_tracking_filename(repo)
+                csv_reporter.append_reviewer_tracking_rows(
+                    tracking_file=reviewer_tracking_filename,
+                    period=tracking_period,
+                    repository=f"{owner}/{repo}",
+                    reviewer_summary=reviewer_analysis_results,
+                    top_n=20  # Track top 20 reviewers per month
+                )
+                
+                logger.info(f"Appended tracking data to {tracking_filename}")
+                logger.info(f"Appended reviewer tracking data to {reviewer_tracking_filename}")
+                if not args.quiet:
+                    print(f"\n📈 Tracking data appended to: {tracking_filename}")
+                    print(f"📈 Reviewer tracking appended to: {reviewer_tracking_filename}")
+                    
+            except CSVReportError as e:
+                logger.error(f"Tracking CSV generation failed: {e}")
+                print(f"\n❌ Failed to append tracking data: {e}")
+                # Don't return 1 - tracking failure shouldn't fail the whole run
         
         # Print summary (unless quiet mode)
         if not args.quiet:

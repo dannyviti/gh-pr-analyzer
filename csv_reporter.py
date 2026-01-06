@@ -583,3 +583,205 @@ class CSVReporter:
                 raise CSVReportError(f"'overload_analysis[{category}]' must be a list")
         
         return True
+    
+    def append_tracking_row(self, tracking_file: str, period: str, repository: str,
+                           pr_summary: Dict[str, Any], reviewer_summary: Dict[str, Any]) -> str:
+        """
+        Append a summary row to a tracking CSV for time-series analysis.
+        
+        Creates the file with headers if it doesn't exist, then appends a single
+        row with summary metrics for the specified period.
+        
+        Args:
+            tracking_file: Path to the tracking CSV file
+            period: Analysis period (e.g., "2024-11" or "Last 3 months")
+            repository: Repository name (owner/repo)
+            pr_summary: PR lifecycle analysis summary dictionary
+            reviewer_summary: Reviewer workload analysis summary dictionary
+            
+        Returns:
+            Path to the tracking CSV file
+            
+        Raises:
+            CSVReportError: If appending fails
+        """
+        tracking_path = Path(tracking_file)
+        
+        # Define tracking CSV headers
+        headers = [
+            'period',
+            'repository',
+            'analysis_date',
+            'total_prs',
+            'merged_prs',
+            'reviewed_prs',
+            'avg_time_to_first_review_hours',
+            'avg_time_to_merge_hours',
+            'avg_commit_lead_time_hours',
+            'total_review_requests',
+            'unique_reviewers',
+            'overloaded_count',
+            'top_10_overloaded'
+        ]
+        
+        try:
+            # Extract PR summary metrics
+            pr_stats = pr_summary.get('summary', {})
+            total_prs = pr_stats.get('total_prs_analyzed', 0)
+            merged_prs = pr_stats.get('merged_prs', 0)
+            reviewed_prs = pr_stats.get('reviewed_prs', 0)
+            avg_first_review = pr_stats.get('avg_time_to_first_review')
+            avg_merge = pr_stats.get('avg_time_to_merge')
+            avg_lead_time = pr_stats.get('avg_commit_lead_time')
+            
+            # Extract reviewer summary metrics
+            reviewer_stats = reviewer_summary.get('statistics', {})
+            reviewer_metadata = reviewer_summary.get('metadata', {})
+            overload_analysis = reviewer_summary.get('overload_analysis', {})
+            reviewer_data = reviewer_summary.get('reviewer_data', {})
+            
+            total_requests = reviewer_stats.get('total_requests', 0)
+            unique_reviewers = reviewer_stats.get('total_reviewers', 0)
+            
+            # Get overloaded reviewers
+            overloaded_list = overload_analysis.get('OVERLOADED', [])
+            overloaded_count = len(overloaded_list)
+            
+            # Format top 10 overloaded reviewers with counts
+            top_10_parts = []
+            for reviewer in overloaded_list[:10]:
+                rev_data = reviewer_data.get(reviewer, {})
+                count = rev_data.get('total_requests', 0)
+                top_10_parts.append(f"{reviewer}:{count}")
+            top_10_str = ','.join(top_10_parts)
+            
+            # Build the data row
+            row = [
+                period,
+                repository,
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                str(total_prs),
+                str(merged_prs),
+                str(reviewed_prs),
+                self._format_number(avg_first_review),
+                self._format_number(avg_merge),
+                self._format_number(avg_lead_time),
+                str(total_requests),
+                str(unique_reviewers),
+                str(overloaded_count),
+                top_10_str
+            ]
+            
+            # Check if file exists to determine if we need headers
+            file_exists = tracking_path.exists()
+            
+            # Ensure parent directory exists
+            tracking_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Append to CSV (create with headers if new)
+            with open(tracking_path, 'a', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                
+                if not file_exists:
+                    writer.writerow(headers)
+                    self.logger.info(f"Created tracking CSV with headers: {tracking_file}")
+                
+                writer.writerow(row)
+            
+            self.logger.info(f"Appended tracking row for {period} to {tracking_file}")
+            return str(tracking_path)
+            
+        except Exception as e:
+            raise CSVReportError(f"Failed to append tracking row: {e}")
+    
+    def append_reviewer_tracking_rows(self, tracking_file: str, period: str, repository: str,
+                                      reviewer_summary: Dict[str, Any], top_n: int = 20) -> str:
+        """
+        Append reviewer-level tracking rows to a CSV for individual reviewer trend analysis.
+        
+        Creates one row per reviewer (top N by request count) for the specified period.
+        This enables tracking individual reviewer workload trends over time in Excel.
+        
+        Args:
+            tracking_file: Path to the reviewer tracking CSV file
+            period: Analysis period (e.g., "2024-11")
+            repository: Repository name (owner/repo)
+            reviewer_summary: Reviewer workload analysis summary dictionary
+            top_n: Number of top reviewers to track (default: 20)
+            
+        Returns:
+            Path to the tracking CSV file
+            
+        Raises:
+            CSVReportError: If appending fails
+        """
+        tracking_path = Path(tracking_file)
+        
+        # Define reviewer tracking CSV headers
+        headers = [
+            'period',
+            'repository',
+            'reviewer',
+            'requests',
+            'workload_status',
+            'percentage_of_total'
+        ]
+        
+        try:
+            # Extract reviewer data
+            reviewer_data = reviewer_summary.get('reviewer_data', {})
+            overload_analysis = reviewer_summary.get('overload_analysis', {})
+            statistics = reviewer_summary.get('statistics', {})
+            
+            total_requests = statistics.get('total_requests', 0)
+            
+            # Create workload status lookup
+            workload_status = {}
+            for status, reviewers in overload_analysis.items():
+                for reviewer in reviewers:
+                    workload_status[reviewer] = status
+            
+            # Sort reviewers by request count (descending) and take top N
+            sorted_reviewers = sorted(
+                reviewer_data.items(),
+                key=lambda x: x[1].get('total_requests', 0),
+                reverse=True
+            )[:top_n]
+            
+            # Check if file exists to determine if we need headers
+            file_exists = tracking_path.exists()
+            
+            # Ensure parent directory exists
+            tracking_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Build rows for each reviewer
+            rows = []
+            for reviewer_login, data in sorted_reviewers:
+                requests = data.get('total_requests', 0)
+                status = workload_status.get(reviewer_login, 'NORMAL')
+                percentage = (requests / total_requests * 100) if total_requests > 0 else 0.0
+                
+                rows.append([
+                    period,
+                    repository,
+                    reviewer_login,
+                    str(requests),
+                    status,
+                    self._format_number(percentage)
+                ])
+            
+            # Append to CSV (create with headers if new)
+            with open(tracking_path, 'a', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                
+                if not file_exists:
+                    writer.writerow(headers)
+                    self.logger.info(f"Created reviewer tracking CSV with headers: {tracking_file}")
+                
+                writer.writerows(rows)
+            
+            self.logger.info(f"Appended {len(rows)} reviewer tracking rows for {period} to {tracking_file}")
+            return str(tracking_path)
+            
+        except Exception as e:
+            raise CSVReportError(f"Failed to append reviewer tracking rows: {e}")
