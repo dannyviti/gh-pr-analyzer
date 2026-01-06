@@ -198,7 +198,8 @@ python github_pr_analyzer.py myorg/myrepo --analyze-reviewers --month 2024-11
 
 #### Time-Series Tracking (for Excel Graphing)
 
-The `--tracking-csv` option appends summary metrics to a tracking file (`pr_tracking_<repo>.csv`) each time you run the tool. This enables building historical data for trend analysis in Excel or other tools.
+The `--tracking-csv` option appends summary metrics to a tracking file (`pr_tracking_<repo>.csv`) each time you run the
+tool. This enables building historical data for trend analysis in Excel or other tools.
 
 **Build monthly history by running each month:**
 
@@ -233,41 +234,44 @@ When using `--tracking-csv`, two files are created/appended:
 
 **Summary tracking CSV columns (`pr_tracking_<repo>.csv`):**
 
-| Column | Description |
-| ------ | ----------- |
-| period | Analysis period (YYYY-MM) |
-| repository | Repository name |
-| analysis_date | When the analysis was run |
-| total_prs | Total PRs in period |
-| merged_prs | Number of merged PRs |
-| reviewed_prs | Number of reviewed PRs |
-| avg_time_to_first_review_hours | Average hours to first review |
-| avg_time_to_merge_hours | Average hours to merge |
-| avg_commit_lead_time_hours | Average commit lead time |
-| total_review_requests | Total reviewer requests |
-| unique_reviewers | Count of unique reviewers |
-| overloaded_count | Number of overloaded reviewers |
-| top_10_overloaded | Top reviewers with counts (e.g., "alice:154,bob:97") |
+| Column                         | Description                                          |
+| ------------------------------ | ---------------------------------------------------- |
+| period                         | Analysis period (YYYY-MM)                            |
+| repository                     | Repository name                                      |
+| analysis_date                  | When the analysis was run                            |
+| total_prs                      | Total PRs in period                                  |
+| merged_prs                     | Number of merged PRs                                 |
+| reviewed_prs                   | Number of reviewed PRs                               |
+| avg_time_to_first_review_hours | Average hours to first review                        |
+| avg_time_to_merge_hours        | Average hours to merge                               |
+| avg_commit_lead_time_hours     | Average commit lead time                             |
+| total_review_requests          | Total reviewer requests                              |
+| unique_reviewers               | Count of unique reviewers                            |
+| overloaded_count               | Number of overloaded reviewers                       |
+| top_10_overloaded              | Top reviewers with counts (e.g., "alice:154,bob:97") |
 
 **Reviewer tracking CSV columns (`pr_tracking_reviewers_<repo>.csv`):**
 
-| Column | Description |
-| ------ | ----------- |
-| period | Analysis period (YYYY-MM) |
-| repository | Repository name |
-| reviewer | Reviewer username |
-| requests | Number of review requests |
-| workload_status | NORMAL, HIGH, or OVERLOADED |
+| Column              | Description                       |
+| ------------------- | --------------------------------- |
+| period              | Analysis period (YYYY-MM)         |
+| repository          | Repository name                   |
+| reviewer            | Reviewer username                 |
+| requests            | Number of review requests         |
+| workload_status     | NORMAL, HIGH, or OVERLOADED       |
 | percentage_of_total | Percentage of all review requests |
 
-This second file makes it easy to create **line charts for individual reviewers** - just create a Pivot Chart in Excel with:
+This second file makes it easy to create **line charts for individual reviewers** - just create a Pivot Chart in Excel
+with:
+
 - Rows: `period`
 - Columns: `reviewer`
 - Values: `requests`
 
 ### Excel Dashboard Generation
 
-Once you have tracking CSV files, you can create Excel dashboards to visualize trends over time. The tool includes a script to copy an existing Excel template and update its data connections for different repositories.
+Once you have tracking CSV files, you can create Excel dashboards to visualize trends over time. The tool includes a
+script to copy an existing Excel template and update its data connections for different repositories.
 
 #### Creating Your First Dashboard (Template)
 
@@ -282,6 +286,7 @@ Once you have tracking CSV files, you can create Excel dashboards to visualize t
    ```
 
 2. **Create an Excel workbook** with Power Query connections:
+
    - Open Excel and go to **Data → Get Data → From Text/CSV**
    - Select `pr_tracking_my-first-repo.csv` and load it
    - Repeat for `pr_tracking_reviewers_my-first-repo.csv`
@@ -323,11 +328,13 @@ python copy_excel_template.py "/path/to/CycleTimeAnalysis.xlsx" repo1 repo2 --ou
 ```
 
 This creates:
+
 - `CycleTimeAnalysis_repo1.xlsx`
 - `CycleTimeAnalysis_repo2.xlsx`
 - `CycleTimeAnalysis_repo3.xlsx`
 
-Each file has its Power Query connections updated to point to the corresponding `pr_tracking_<repo>.csv` and `pr_tracking_reviewers_<repo>.csv` files.
+Each file has its Power Query connections updated to point to the corresponding `pr_tracking_<repo>.csv` and
+`pr_tracking_reviewers_<repo>.csv` files.
 
 #### Refreshing Data in Excel
 

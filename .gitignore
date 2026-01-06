@@ -160,6 +160,8 @@ cython_debug/
 
 # Project-specific ignores
 *.csv
+*.xlsx
+~$*.xlsx
 sample_data/
 output/
 logs/
