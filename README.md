@@ -15,6 +15,19 @@ Analyzes three key timing metrics for GitHub pull requests:
 - **Time to Merge**: Time from PR creation to successful merge
 - **Commit Lead Time**: Time from first commit to merge (development velocity)
 
+#### Understanding the Timing Metrics
+
+| Metric | Start Point | End Point | What it measures |
+|--------|-------------|-----------|------------------|
+| Time to First Review | PR created | First review/comment | How quickly PRs get attention |
+| Time to Merge | PR created | PR merged | PR turnaround time |
+| Commit Lead Time | First commit | PR merged | Full development cycle |
+
+**Why Commit Lead Time matters**: This metric captures the *full* development cycle - from when a developer first
+starts writing code to when it ships. It's often longer than Time to Merge because developers make commits locally
+*before* opening a PR. If Commit Lead Time is significantly higher than Time to Merge, it may indicate work is sitting
+idle in branches before PRs are opened, or developers are batching too much work locally.
+
 ### Reviewer Workload Analysis (New!)
 
 Analyzes reviewer request patterns and workload distribution:
