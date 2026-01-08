@@ -17,16 +17,16 @@ Analyzes three key timing metrics for GitHub pull requests:
 
 #### Understanding the Timing Metrics
 
-| Metric | Start Point | End Point | What it measures |
-|--------|-------------|-----------|------------------|
-| Time to First Review | PR created | First review/comment | How quickly PRs get attention |
-| Time to Merge | PR created | PR merged | PR turnaround time |
-| Commit Lead Time | First commit | PR merged | Full development cycle |
+| Metric               | Start Point  | End Point            | What it measures              |
+| -------------------- | ------------ | -------------------- | ----------------------------- |
+| Time to First Review | PR created   | First review/comment | How quickly PRs get attention |
+| Time to Merge        | PR created   | PR merged            | PR turnaround time            |
+| Commit Lead Time     | First commit | PR merged            | Full development cycle        |
 
-**Why Commit Lead Time matters**: This metric captures the *full* development cycle - from when a developer first
-starts writing code to when it ships. It's often longer than Time to Merge because developers make commits locally
-*before* opening a PR. If Commit Lead Time is significantly higher than Time to Merge, it may indicate work is sitting
-idle in branches before PRs are opened, or developers are batching too much work locally.
+**Why Commit Lead Time matters**: This metric captures the _full_ development cycle - from when a developer first starts
+writing code to when it ships. It's often longer than Time to Merge because developers make commits locally _before_
+opening a PR. If Commit Lead Time is significantly higher than Time to Merge, it may indicate work is sitting idle in
+branches before PRs are opened, or developers are batching too much work locally.
 
 ### Reviewer Workload Analysis (New!)
 
@@ -214,7 +214,19 @@ python github_pr_analyzer.py myorg/myrepo --analyze-reviewers --month 2024-11
 The `--tracking-csv` option appends summary metrics to a tracking file (`pr_tracking_<repo>.csv`) each time you run the
 tool. This enables building historical data for trend analysis in Excel or other tools.
 
-**Build monthly history by running each month:**
+**Backfill multiple months at once:**
+
+When using `--months` with `--tracking-csv`, the tool automatically breaks down the data by individual months:
+
+```bash
+source venv/bin/activate
+# Backfill the last 6 months - creates one row per month
+python github_pr_analyzer.py myorg/myrepo --months 6 --tracking-csv
+
+# This creates 6 rows in pr_tracking_myrepo.csv (one for each month)
+```
+
+**Run for a specific month:**
 
 ```bash
 source venv/bin/activate
@@ -224,18 +236,7 @@ python github_pr_analyzer.py myorg/myrepo --month 2024-11 --tracking-csv
 # Run for December 2024
 python github_pr_analyzer.py myorg/myrepo --month 2024-12 --tracking-csv
 
-# Each run appends to: pr_tracking_myrepo.csv
-```
-
-**Backfill historical data:**
-
-```bash
-source venv/bin/activate
-# Run for each past month to build history
-python github_pr_analyzer.py myorg/myrepo --month 2024-06 --tracking-csv
-python github_pr_analyzer.py myorg/myrepo --month 2024-07 --tracking-csv
-python github_pr_analyzer.py myorg/myrepo --month 2024-08 --tracking-csv
-# ... continue for each month
+# Each run appends one row to: pr_tracking_myrepo.csv
 ```
 
 **Output files created:**

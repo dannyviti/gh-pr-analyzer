@@ -915,38 +915,113 @@ def main() -> int:
         if args.tracking_csv:
             try:
                 tracking_filename = generate_tracking_filename(repo)
-                
-                # Build period string for tracking
-                if args.month:
-                    tracking_period = args.month
-                else:
-                    # Calculate the start date for the period
-                    start_date = datetime.now() - relativedelta(months=analysis_months)
-                    tracking_period = start_date.strftime("%Y-%m")
-                
-                csv_reporter.append_tracking_row(
-                    tracking_file=tracking_filename,
-                    period=tracking_period,
-                    repository=f"{owner}/{repo}",
-                    pr_summary=pr_analysis_results,
-                    reviewer_summary=reviewer_analysis_results
-                )
-                
-                # Also append reviewer-level tracking data
                 reviewer_tracking_filename = generate_reviewer_tracking_filename(repo)
-                csv_reporter.append_reviewer_tracking_rows(
-                    tracking_file=reviewer_tracking_filename,
-                    period=tracking_period,
-                    repository=f"{owner}/{repo}",
-                    reviewer_summary=reviewer_analysis_results,
-                    top_n=20  # Track top 20 reviewers per month
-                )
                 
-                logger.info(f"Appended tracking data to {tracking_filename}")
-                logger.info(f"Appended reviewer tracking data to {reviewer_tracking_filename}")
-                if not args.quiet:
-                    print(f"\n📈 Tracking data appended to: {tracking_filename}")
-                    print(f"📈 Reviewer tracking appended to: {reviewer_tracking_filename}")
+                if args.month:
+                    # Single month mode - just append one row
+                    csv_reporter.append_tracking_row(
+                        tracking_file=tracking_filename,
+                        period=args.month,
+                        repository=f"{owner}/{repo}",
+                        pr_summary=pr_analysis_results,
+                        reviewer_summary=reviewer_analysis_results
+                    )
+                    csv_reporter.append_reviewer_tracking_rows(
+                        tracking_file=reviewer_tracking_filename,
+                        period=args.month,
+                        repository=f"{owner}/{repo}",
+                        reviewer_summary=reviewer_analysis_results,
+                        top_n=20
+                    )
+                    if not args.quiet:
+                        print(f"\n📈 Tracking data appended to: {tracking_filename}")
+                        print(f"📈 Reviewer tracking appended to: {reviewer_tracking_filename}")
+                else:
+                    # Multi-month mode - break down by individual months
+                    if not args.quiet:
+                        print(f"\n📈 Breaking down {analysis_months} months into individual tracking rows...")
+                    
+                    months_processed = 0
+                    for month_offset in range(analysis_months - 1, -1, -1):  # Go from oldest to newest
+                        # Calculate the month to analyze
+                        target_date = datetime.now() - relativedelta(months=month_offset)
+                        month_str = target_date.strftime("%Y-%m")
+                        
+                        # Calculate start and end dates for this specific month
+                        month_start = target_date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                        if month_offset == 0:
+                            # Current month - end is now
+                            month_end = datetime.now()
+                        else:
+                            # Past month - end is last day of that month
+                            next_month = month_start + relativedelta(months=1)
+                            month_end = next_month - relativedelta(days=1)
+                            month_end = month_end.replace(hour=23, minute=59, second=59)
+                        
+                        logger.info(f"Processing {month_str}...")
+                        
+                        # Fetch PRs for this specific month
+                        try:
+                            month_prs = pr_analyzer.fetch_specific_month_prs(owner, repo, month_start, month_end)
+                        except Exception as e:
+                            logger.warning(f"Failed to fetch PRs for {month_str}: {e}")
+                            continue
+                        
+                        if not month_prs:
+                            logger.info(f"No PRs found for {month_str}, skipping...")
+                            continue
+                        
+                        # Run PR lifecycle analysis for this month
+                        try:
+                            month_pr_results = pr_analyzer.analyze_pr_lifecycle_times(
+                                month_prs, owner, repo,
+                                batch_size=args.batch_size,
+                                batch_delay=args.batch_delay,
+                                max_retries=args.max_retries
+                            )
+                        except Exception as e:
+                            logger.warning(f"PR analysis failed for {month_str}: {e}")
+                            month_pr_results = None
+                        
+                        # Run reviewer analysis for this month
+                        try:
+                            month_reviewer_analyzer = ReviewerWorkloadAnalyzer(default_threshold=args.reviewer_threshold)
+                            org_name = owner if args.include_teams else None
+                            month_reviewer_results = month_reviewer_analyzer.get_reviewer_workload_summary(
+                                month_prs,
+                                threshold=args.reviewer_threshold,
+                                include_teams=args.include_teams,
+                                org_name=org_name
+                            )
+                        except Exception as e:
+                            logger.warning(f"Reviewer analysis failed for {month_str}: {e}")
+                            month_reviewer_results = None
+                        
+                        # Append tracking rows for this month
+                        if month_pr_results or month_reviewer_results:
+                            csv_reporter.append_tracking_row(
+                                tracking_file=tracking_filename,
+                                period=month_str,
+                                repository=f"{owner}/{repo}",
+                                pr_summary=month_pr_results,
+                                reviewer_summary=month_reviewer_results
+                            )
+                            if month_reviewer_results:
+                                csv_reporter.append_reviewer_tracking_rows(
+                                    tracking_file=reviewer_tracking_filename,
+                                    period=month_str,
+                                    repository=f"{owner}/{repo}",
+                                    reviewer_summary=month_reviewer_results,
+                                    top_n=20
+                                )
+                            months_processed += 1
+                            logger.info(f"Added tracking data for {month_str}")
+                    
+                    if not args.quiet:
+                        print(f"📈 Added {months_processed} monthly rows to: {tracking_filename}")
+                        print(f"📈 Added reviewer data for {months_processed} months to: {reviewer_tracking_filename}")
+                
+                logger.info(f"Tracking CSV generation complete")
                     
             except CSVReportError as e:
                 logger.error(f"Tracking CSV generation failed: {e}")
