@@ -350,6 +350,40 @@ This creates:
 Each file has its Power Query connections updated to point to the corresponding `pr_tracking_<repo>.csv` and
 `pr_tracking_reviewers_<repo>.csv` files.
 
+#### Merging Data for Cross-Repo Comparison
+
+To compare metrics across multiple repositories in a single dashboard, use `merge_tracking_csvs.py` to combine all
+tracking CSV files:
+
+```bash
+source venv/bin/activate
+
+# Merge all pr_tracking_*.csv files in current directory
+python merge_tracking_csvs.py
+
+# Or specify input/output directories
+python merge_tracking_csvs.py --input-dir /path/to/csvs --output-dir /path/to/output
+```
+
+This creates two combined files:
+
+| File                               | Contents                                                           |
+| ---------------------------------- | ------------------------------------------------------------------ |
+| `pr_tracking_combined.csv`         | All PR metrics from all repos (period, repository, total_prs, etc) |
+| `pr_tracking_reviewers_combined.csv` | All reviewer data from all repos                                   |
+
+The combined CSVs preserve the `repository` column, enabling Excel pivot tables to:
+
+- Filter by individual repository
+- Compare metrics side-by-side across repos
+- Aggregate totals across all repositories
+
+**Recommended cross-repo charts:**
+
+- **Line chart**: Average time to merge by period, with separate line per repository
+- **Bar chart**: Total PRs per repository per period
+- **Pivot table**: Reviewer requests across all repos, filterable by period and repository
+
 #### Refreshing Data in Excel
 
 After opening a generated Excel file:
@@ -520,6 +554,9 @@ The tool is built with a modular architecture:
 - **`copy_excel_template.py`**: Excel template copying utility
   - Copies an existing Excel workbook and updates Power Query data connections for new repositories
   - Handles all internal Excel XML structures (connections, charts, pivot tables, etc.)
+- **`merge_tracking_csvs.py`**: Multi-repo CSV merge utility
+  - Auto-discovers and merges all `pr_tracking_*.csv` files into combined files
+  - Enables cross-repository comparison dashboards in Excel
 
 ## Testing
 
